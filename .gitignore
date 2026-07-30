@@ -8,6 +8,8 @@
 /wandb
 /venv
 /cache
+/native/out
+/native/validation/*.marprompt
 
 **/.ipynb_checkpoints/
 .vscode/
