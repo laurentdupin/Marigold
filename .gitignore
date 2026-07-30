@@ -11,6 +11,7 @@
 /native/out
 /native/build-*/
 /native/validation/*.marprompt
+/native/validation/marigold-vae.safetensors
 
 **/.ipynb_checkpoints/
 .vscode/
