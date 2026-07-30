@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define MARIGOLD_NATIVE_ABI_VERSION 1u
+#define MARIGOLD_NATIVE_ABI_VERSION 2u
 
 typedef struct marigold_context marigold_context;
 
@@ -35,6 +35,12 @@ MARIGOLD_API int marigold_create(
     const char* snapshot_root_utf8,
     const char* derived_vae_safetensors_utf8,
     const char* empty_prompt_cache_utf8,
+    marigold_context** output);
+MARIGOLD_API int marigold_create_vulkan(
+    const char* snapshot_root_utf8,
+    const char* derived_vae_safetensors_utf8,
+    const char* empty_prompt_cache_utf8,
+    uint32_t device_index,
     marigold_context** output);
 MARIGOLD_API void marigold_destroy(marigold_context* context);
 

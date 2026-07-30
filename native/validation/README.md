@@ -40,6 +40,26 @@ decoding, clipping, channel reduction, and output resizing.
 | Non-multiple input | `65x73` passed |
 | C ABI smoke test | passed |
 
-`marigold_native.dll` exposes ABI 1 lifecycle and stable seeded inference.
+`marigold_native.dll` exposes ABI 2 lifecycle and stable seeded inference.
 The exact validation entry accepts explicit target noise to remove stochastic
-ambiguity. It does not advertise Vulkan or GPU residency yet.
+ambiguity.
+
+The additive `marigold_create_vulkan` entry converts the canonical FP16 UNet
+weights to FP32 during bounded model upload and consumes the same safe derived
+VAE sidecar. It fails instead of falling back to CPU. RGB upload and final
+depth download remain at the tensor ABI boundary; VAE mean encoding,
+conditional UNet, one-step scheduler conversion, decoding, and intermediates
+remain on the selected GPU.
+
+| GPU | Full 64x64 relative L1 | Maximum absolute |
+|---|---:|---:|
+| Radeon RX 9070 | `9.86589e-5` | `0.000829935` |
+| GeForce GTX 1080 | `9.80252e-5` | `0.000833750` |
+| Radeon RX 6700 XT | `9.89217e-5` | `0.000844181` |
+
+Five consecutive calls on persistent contexts passed. Concurrent canary
+medians were 393.47 ms (RX 9070), 717.99 ms (GTX 1080), and 331.08 ms
+(RX 6700 XT); these are stability measurements for the untuned graph.
+
+This is the untuned FP32 execution baseline. Mixed precision and external
+GPU-resource import/export are not advertised without separate gates.

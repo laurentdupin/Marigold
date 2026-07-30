@@ -9,6 +9,7 @@
 /venv
 /cache
 /native/out
+/native/build-*/
 /native/validation/*.marprompt
 
 **/.ipynb_checkpoints/

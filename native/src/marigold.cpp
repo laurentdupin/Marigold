@@ -4,6 +4,12 @@
 #include "prompt_cache.h"
 #include "unet_cpu.h"
 #include "vae_cpu.h"
+#if defined(MARIGOLD_WITH_VULKAN)
+#include "gpu_model.h"
+#include "marigold_gpu.h"
+#include "operators.h"
+#include "vulkan.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -16,6 +22,12 @@
 struct marigold_context {
     std::unique_ptr<marigold_native::ModelBundle> model;
     marigold_native::TokenTensor prompt;
+#if defined(MARIGOLD_WITH_VULKAN)
+    std::unique_ptr<marigold_native::VulkanContext> vulkan;
+    std::unique_ptr<marigold_native::GpuModel> gpu_unet;
+    std::unique_ptr<marigold_native::GpuModel> gpu_vae;
+    std::unique_ptr<marigold_native::VulkanOperators> operators;
+#endif
 };
 
 namespace {
@@ -159,6 +171,48 @@ int marigold_create(
     }
 }
 
+int marigold_create_vulkan(
+    const char* snapshot,
+    const char* derived_vae,
+    const char* prompt_cache,
+    std::uint32_t device_index,
+    marigold_context** output) {
+    if (!snapshot || !derived_vae || !prompt_cache || !output) {
+        return fail(
+            MARIGOLD_INVALID_ARGUMENT,
+            "invalid Marigold create argument");
+    }
+    *output = nullptr;
+#if !defined(MARIGOLD_WITH_VULKAN)
+    (void)device_index;
+    return fail(
+        MARIGOLD_RUNTIME_ERROR, "this DLL was built without Vulkan");
+#else
+    try {
+        auto context = std::make_unique<marigold_context>();
+        context->model =
+            std::make_unique<marigold_native::ModelBundle>(
+                snapshot, derived_vae);
+        context->prompt =
+            marigold_native::load_empty_prompt_cache(prompt_cache);
+        context->vulkan =
+            std::make_unique<marigold_native::VulkanContext>(device_index);
+        context->gpu_unet = std::make_unique<marigold_native::GpuModel>(
+            context->model->unet(), *context->vulkan);
+        context->gpu_vae = std::make_unique<marigold_native::GpuModel>(
+            context->model->vae(), *context->vulkan);
+        context->operators =
+            std::make_unique<marigold_native::VulkanOperators>(
+                *context->vulkan);
+        *output = context.release();
+        last_error.clear();
+        return MARIGOLD_OK;
+    } catch (const std::exception& error) {
+        return fail(MARIGOLD_MODEL_ERROR, error);
+    }
+#endif
+}
+
 void marigold_destroy(marigold_context* context) {
     delete context;
 }
@@ -176,6 +230,20 @@ int marigold_infer_rgb_f32_with_noise(
             "invalid Marigold inference argument");
     }
     try {
+#if defined(MARIGOLD_WITH_VULKAN)
+        if (context->vulkan) {
+            marigold_native::VulkanBuffer output =
+                marigold_native::marigold_infer_gpu(
+                    *context->vulkan, *context->gpu_unet,
+                    *context->gpu_vae, *context->operators,
+                    context->prompt, rgb, width, height, target_noise);
+            context->vulkan->download(
+                output, depth,
+                std::uint64_t(width) * height * sizeof(float));
+            last_error.clear();
+            return MARIGOLD_OK;
+        }
+#endif
         output_depth(
             infer(*context, rgb, width, height, target_noise),
             width, height, depth);
