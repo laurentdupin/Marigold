@@ -40,9 +40,24 @@ decoding, clipping, channel reduction, and output resizing.
 | Non-multiple input | `65x73` passed |
 | C ABI smoke test | passed |
 
-`marigold_native.dll` exposes ABI 2 lifecycle and stable seeded inference.
+`marigold_native.dll` exposes ABI 3 lifecycle and stable seeded inference.
 The exact validation entry accepts explicit target noise to remove stochastic
 ambiguity.
+
+ABI 3 adds the InferBridge byte-image contract without changing the tensor
+ABI. `marigold_inferbridge_image_shape` reports the 768-pixel longest-edge
+processing dimensions. `marigold_infer_bgra8_f32[_with_noise]` performs the
+Python harness's BGR-to-RGB conversion, separable antialiased bilinear resize,
+`match_input_res=false` output sizing, and final
+`(depth-min)/(1-min)` normalization. This path remains host-backed and does
+not advertise an external GPU-resource capability.
+
+The separable filter was checked against PyTorch CPU for representative
+upscales and downscales; the largest float64 discrepancy was
+`5.55112e-16`. A full 768x64 explicit-noise image-contract canary compared
+the BGRA entry with the already validated tensor graph and normalization on
+all adapters. Maximum and mean absolute differences were both exactly zero
+on the RX 9070, GTX 1080, and RX 6700 XT.
 
 The additive `marigold_create_vulkan` entry converts the canonical FP16 UNet
 weights to FP32 during bounded model upload and consumes the same safe derived

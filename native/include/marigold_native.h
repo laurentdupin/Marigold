@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define MARIGOLD_NATIVE_ABI_VERSION 2u
+#define MARIGOLD_NATIVE_ABI_VERSION 3u
 
 typedef struct marigold_context marigold_context;
 
@@ -62,6 +62,36 @@ MARIGOLD_API int marigold_infer_rgb_f32(
     const float* rgb,
     uint32_t width,
     uint32_t height,
+    uint64_t seed,
+    float* depth);
+
+/*
+ * InferBridge image contract. The source is BGRA8. The Python harness first
+ * converts BGR to RGB, then resizes the longest edge to 768 with antialiased
+ * bilinear filtering. Its match_input_res=false result therefore has the
+ * processing dimensions returned by marigold_inferbridge_image_shape.
+ */
+MARIGOLD_API int marigold_inferbridge_image_shape(
+    uint32_t source_width,
+    uint32_t source_height,
+    uint32_t* processing_width,
+    uint32_t* processing_height);
+
+MARIGOLD_API int marigold_infer_bgra8_f32_with_noise(
+    marigold_context* context,
+    const uint8_t* bgra,
+    uint32_t width,
+    uint32_t height,
+    uint32_t row_stride_bytes,
+    const float* target_noise,
+    float* depth);
+
+MARIGOLD_API int marigold_infer_bgra8_f32(
+    marigold_context* context,
+    const uint8_t* bgra,
+    uint32_t width,
+    uint32_t height,
+    uint32_t row_stride_bytes,
     uint64_t seed,
     float* depth);
 
