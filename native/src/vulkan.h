@@ -172,6 +172,7 @@ public:
     ~VulkanContext();
 
     const std::string& device_name() const { return device_name_; }
+    std::uint32_t subgroup_size() const { return subgroup_size_; }
     const VulkanExternalCapabilities& external_capabilities() const {
         return external_capabilities_;
     }
@@ -417,6 +418,7 @@ private:
     std::atomic<std::uint64_t> tensor_upload_bytes_{0};
     std::atomic<std::uint64_t> tensor_download_bytes_{0};
     std::string device_name_;
+    std::uint32_t subgroup_size_ = 0;
 };
 
 }  // namespace marigold_native

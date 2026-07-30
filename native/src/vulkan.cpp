@@ -226,6 +226,14 @@ VulkanContext::VulkanContext(
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
     device_name_ = properties.deviceName;
+    VkPhysicalDeviceSubgroupProperties subgroup{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 subgroup_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &subgroup};
+    vkGetPhysicalDeviceProperties2(
+        physical_device_, &subgroup_properties);
+    subgroup_size_ = subgroup.subgroupSize;
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,

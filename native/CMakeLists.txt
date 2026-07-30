@@ -48,10 +48,10 @@ if(MARIGOLD_WITH_VULKAN)
     foreach(SHADER
             add_scaled add add_position bilinear_align_true
             bilinear_align_true_image bmm bmm_score_half bmm_value_half
-            conv2d conv2d8 conv2d_half conv2d8_half
+            conv2d conv2d8 conv2d_half conv2d8_half conv2d8_tiled
             conv_transpose_nonoverlap conv_transpose_nonoverlap_half
             elementwise gelu layer_norm linear linear16 linear_half
-            linear16_half prepare_tokens position_bicubic project_tokens
+            linear16_half linear_vec8 prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb
