@@ -195,6 +195,8 @@ private:
 
     GpuImage vae_resnet(
         GpuImage&& input, const std::string& prefix) {
+        GpuImage result;
+        context_.batch([&] {
         GpuImage hidden = copy_image(input);
         group_norm(
             vae_, hidden, prefix + ".norm1.weight",
@@ -221,7 +223,9 @@ private:
         operators_.add(
             hidden.buffer, hidden.buffer, residual.buffer,
             static_cast<std::uint32_t>(elements(hidden)));
-        return hidden;
+        result = std::move(hidden);
+        });
+        return result;
     }
 
     bool tensor_exists(const GpuModel& model, const std::string& name) {
@@ -320,6 +324,8 @@ private:
 
     GpuImage spatial_attention(
         GpuImage&& input, const std::string& prefix) {
+        GpuImage result;
+        context_.batch([&] {
         GpuImage normalized = copy_image(input);
         group_norm(
             vae_, normalized, prefix + ".group_norm.weight",
@@ -332,7 +338,9 @@ private:
         operators_.add(
             output.buffer, output.buffer, input.buffer,
             static_cast<std::uint32_t>(elements(input)));
-        return output;
+        result = std::move(output);
+        });
+        return result;
     }
 
     GpuImage vae_mid(GpuImage&& hidden, const std::string& prefix) {
@@ -447,6 +455,8 @@ private:
     GpuImage unet_resnet(
         GpuImage&& input, const GpuTokens& time,
         const std::string& prefix) {
+        GpuImage result;
+        context_.batch([&] {
         GpuImage hidden = copy_image(input);
         group_norm(
             unet_, hidden, prefix + ".norm1.weight",
@@ -488,12 +498,16 @@ private:
         operators_.add(
             hidden.buffer, hidden.buffer, residual.buffer,
             static_cast<std::uint32_t>(elements(hidden)));
-        return hidden;
+        result = std::move(hidden);
+        });
+        return result;
     }
 
     GpuImage transformer(
         GpuImage&& input, const std::string& prefix,
         std::uint32_t heads) {
+        GpuImage result;
+        context_.batch([&] {
         GpuImage normalized = copy_image(input);
         group_norm(
             unet_, normalized, prefix + ".norm.weight",
@@ -550,7 +564,9 @@ private:
         operators_.add(
             output.buffer, output.buffer, input.buffer,
             static_cast<std::uint32_t>(elements(input)));
-        return output;
+        result = std::move(output);
+        });
+        return result;
     }
 
     GpuImage unet_predict(GpuImage&& sample) {

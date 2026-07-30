@@ -63,3 +63,15 @@ medians were 393.47 ms (RX 9070), 717.99 ms (GTX 1080), and 331.08 ms
 
 This is the untuned FP32 execution baseline. Mixed precision and external
 GPU-resource import/export are not advertised without separate gates.
+
+## First performance pass
+
+VAE and UNet ResNet, attention, and transformer composites now use bounded
+Vulkan command batches. Buffer snapshots within a batch use explicit
+transfer/compute barriers. Each batch remains block-sized for watchdog safety.
+
+The isolated RX 9070 64x64 median improved from `364.9 ms` to `177.3 ms`
+(`51.4%`) in matched seven-iteration runs. Five-call post-change canaries
+passed with unchanged errors on every adapter; observed medians were
+`226.7 ms` (RX 9070), `625.9 ms` (GTX 1080), and `207.4 ms`
+(RX 6700 XT).
