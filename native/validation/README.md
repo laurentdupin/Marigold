@@ -90,3 +90,31 @@ The isolated RX 9070 64x64 median improved from `364.9 ms` to `177.3 ms`
 passed with unchanged errors on every adapter; observed medians were
 `226.7 ms` (RX 9070), `625.9 ms` (GTX 1080), and `207.4 ms`
 (RX 6700 XT).
+
+## Full v1 checkpoint
+
+ABI 4 adds `marigold_create_variant` and
+`marigold_create_vulkan_variant`, preserving the original create functions
+as LCM aliases. `MARIGOLD_MODEL_FULL_V1` selects InferBridge's second
+checkpoint, `prs-eth/marigold-v1-0` at revision
+`f4fc453d7d217cbe30ddcad3eb311d1ad9a11c4c`. The native loader maps its
+canonical FP16 UNet and VAE Safetensors directly; no unsafe archive
+conversion or duplicate VAE is needed. The full model's prompt cache is a
+separate content-bound 8,704-byte sidecar, reusing the identical text-encoder
+result but binding the full checkpoint revision and hashes.
+
+The full graph executes the checkpoint's exact ten DDIM timesteps
+`[901, 801, 701, 601, 501, 401, 301, 201, 101, 1]`. RGB latent, target
+latent, all ten UNet passes, deterministic `v_prediction` scheduler updates,
+and VAE decode remain on Vulkan.
+
+| Executor | Full 64x64 relative L1 | Maximum absolute |
+|---|---:|---:|
+| CPU | `5.79980e-5` | `0.000190556` |
+| Radeon RX 9070 | `5.73731e-5` | `0.000192225` |
+| GeForce GTX 1080 | `5.73923e-5` | `0.000188887` |
+| Radeon RX 6700 XT | `5.75631e-5` | `0.000190258` |
+
+The 768x64 full-v1 BGRA image-contract equivalence canary passed on all
+three GPUs with exactly zero maximum and mean absolute difference versus the
+validated tensor path plus InferBridge normalization.

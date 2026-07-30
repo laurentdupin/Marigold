@@ -13,14 +13,25 @@ namespace {
 constexpr std::array<char, 8> magic = {
     'M', 'A', 'R', 'P', 'R', 'M', '0', '1'};
 constexpr std::uint32_t header_bytes = 512;
-constexpr char revision[] =
-    "04a73502f7fd8fc5e59947b9df3b2266d71d6849";
-constexpr char unet_hash[] =
-    "953f1ea06169fc6c358b09ecc96a6ee32515e81540442d16239f82348ea62614";
-constexpr char vae_hash[] =
-    "a4302e1efa25f3a47ceb7536bc335715ad9d1f203e90c2d25507600d74006e89";
 constexpr char text_hash[] =
     "bc1827c465450322616f06dea41596eac7d493f4e95904dcb51f0fc745c4e13f";
+struct ModelIdentity {
+    const char* revision;
+    const char* unet_hash;
+    const char* vae_hash;
+};
+constexpr ModelIdentity identities[] = {
+    {
+        "04a73502f7fd8fc5e59947b9df3b2266d71d6849",
+        "953f1ea06169fc6c358b09ecc96a6ee32515e81540442d16239f82348ea62614",
+        "a4302e1efa25f3a47ceb7536bc335715ad9d1f203e90c2d25507600d74006e89",
+    },
+    {
+        "f4fc453d7d217cbe30ddcad3eb311d1ad9a11c4c",
+        "da9c13e214461c2cf82e4a0f125d914976522e53806a54d508e30ea5b8cd67f2",
+        "3e4c08995484ee61270175e9e7a072b66a6e4eeb5f0c266667fe1f45b90daf9a",
+    },
+};
 
 std::uint32_t u32(const char* data) {
     return std::uint32_t(static_cast<unsigned char>(data[0])) |
@@ -43,7 +54,9 @@ void expect(
 
 }  // namespace
 
-TokenTensor load_empty_prompt_cache(const std::string& path) {
+TokenTensor load_empty_prompt_cache(
+    const std::string& path,
+    bool full_v1) {
     std::ifstream stream(
         std::filesystem::u8path(path), std::ios::binary);
     std::array<char, header_bytes> header{};
@@ -56,9 +69,10 @@ TokenTensor load_empty_prompt_cache(const std::string& path) {
         u32(header.data() + 20) != 1024) {
         throw std::runtime_error("invalid Marigold prompt cache header");
     }
-    expect(header.data() + 24, 41, revision, "revision");
-    expect(header.data() + 65, 65, unet_hash, "UNet hash");
-    expect(header.data() + 130, 65, vae_hash, "VAE hash");
+    const ModelIdentity& identity = identities[full_v1 ? 1 : 0];
+    expect(header.data() + 24, 41, identity.revision, "revision");
+    expect(header.data() + 65, 65, identity.unet_hash, "UNet hash");
+    expect(header.data() + 130, 65, identity.vae_hash, "VAE hash");
     expect(header.data() + 195, 65, text_hash, "text hash");
     TokenTensor prompt{
         2, 1024, std::vector<float>(2 * 1024)};

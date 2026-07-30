@@ -177,6 +177,10 @@ public:
     void scheduler_target(
         VulkanBuffer& prediction, const VulkanBuffer& noise,
         std::uint32_t count);
+    void ddim_step(
+        VulkanBuffer& output, const VulkanBuffer& prediction,
+        const VulkanBuffer& sample, std::uint32_t count,
+        float alpha, float previous_alpha);
 
 private:
     VulkanContext& context_;
@@ -221,6 +225,7 @@ private:
     VulkanPipeline scale_values_;
     VulkanPipeline depth_output_;
     VulkanPipeline scheduler_target_;
+    VulkanPipeline ddim_step_;
 };
 
 }  // namespace marigold_native

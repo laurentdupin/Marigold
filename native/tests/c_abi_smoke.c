@@ -19,6 +19,12 @@ int main(void) {
             53, 0, &width, &height) != MARIGOLD_INVALID_ARGUMENT) {
         return 4;
     }
+    if (marigold_create_variant(
+            "snapshot", "vae", "prompt",
+            (marigold_model_variant)99, &context) !=
+        MARIGOLD_INVALID_ARGUMENT) {
+        return 5;
+    }
     marigold_destroy(context);
     return 0;
 }

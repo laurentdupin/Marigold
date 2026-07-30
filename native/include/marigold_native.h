@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define MARIGOLD_NATIVE_ABI_VERSION 3u
+#define MARIGOLD_NATIVE_ABI_VERSION 4u
 
 typedef struct marigold_context marigold_context;
 
@@ -27,6 +27,11 @@ enum {
     MARIGOLD_MODEL_ERROR = 2,
     MARIGOLD_RUNTIME_ERROR = 3
 };
+
+typedef enum marigold_model_variant {
+    MARIGOLD_MODEL_LCM_V1 = 0,
+    MARIGOLD_MODEL_FULL_V1 = 1
+} marigold_model_variant;
 
 MARIGOLD_API uint32_t marigold_native_abi_version(void);
 MARIGOLD_API const char* marigold_last_error(void);
@@ -40,6 +45,19 @@ MARIGOLD_API int marigold_create_vulkan(
     const char* snapshot_root_utf8,
     const char* derived_vae_safetensors_utf8,
     const char* empty_prompt_cache_utf8,
+    uint32_t device_index,
+    marigold_context** output);
+MARIGOLD_API int marigold_create_variant(
+    const char* snapshot_root_utf8,
+    const char* vae_safetensors_utf8,
+    const char* empty_prompt_cache_utf8,
+    marigold_model_variant variant,
+    marigold_context** output);
+MARIGOLD_API int marigold_create_vulkan_variant(
+    const char* snapshot_root_utf8,
+    const char* vae_safetensors_utf8,
+    const char* empty_prompt_cache_utf8,
+    marigold_model_variant variant,
     uint32_t device_index,
     marigold_context** output);
 MARIGOLD_API void marigold_destroy(marigold_context* context);

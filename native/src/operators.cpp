@@ -41,6 +41,7 @@
 #include "scale_values_spv.h"
 #include "depth_output_spv.h"
 #include "scheduler_target_spv.h"
+#include "ddim_step_spv.h"
 
 #include <limits>
 #include <stdexcept>
@@ -224,7 +225,10 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_depth_output_spv, marigold_depth_output_spv_size, 2, 16)),
       scheduler_target_(context.create_pipeline(
           marigold_scheduler_target_spv,
-          marigold_scheduler_target_spv_size, 2, 4)) {
+          marigold_scheduler_target_spv_size, 2, 4)),
+      ddim_step_(context.create_pipeline(
+          marigold_ddim_step_spv,
+          marigold_ddim_step_spv_size, 3, 12)) {
     linear_.set_debug_name("linear");
     linear16_.set_debug_name("linear16");
     linear_half_.set_debug_name("linear_half");
@@ -272,6 +276,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     scale_values_.set_debug_name("scale_values");
     depth_output_.set_debug_name("depth_output");
     scheduler_target_.set_debug_name("scheduler_target");
+    ddim_step_.set_debug_name("ddim_step");
 }
 
 void VulkanOperators::linear(
@@ -1182,6 +1187,26 @@ void VulkanOperators::scheduler_target(
     context_.dispatch(
         scheduler_target_, {&prediction, &noise}, &count, sizeof(count),
         divide_up(count, 256));
+}
+
+void VulkanOperators::ddim_step(
+    VulkanBuffer& output,
+    const VulkanBuffer& prediction,
+    const VulkanBuffer& sample,
+    std::uint32_t count,
+    float alpha,
+    float previous_alpha) {
+    require_bytes(output, count, "DDIM output");
+    require_bytes(prediction, count, "DDIM prediction");
+    require_bytes(sample, count, "DDIM sample");
+    struct Parameters {
+        std::uint32_t count;
+        float alpha;
+        float previous_alpha;
+    } parameters{count, alpha, previous_alpha};
+    context_.dispatch(
+        ddim_step_, {&output, &prediction, &sample},
+        &parameters, sizeof(parameters), divide_up(count, 256));
 }
 
 }  // namespace marigold_native

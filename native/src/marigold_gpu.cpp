@@ -1,5 +1,6 @@
 #include "marigold_gpu.h"
 
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -46,7 +47,7 @@ public:
 
     GpuImage run(
         const float* rgb, std::uint32_t width, std::uint32_t height,
-        const float* target_noise) {
+        const float* target_noise, bool full_v1) {
         const std::uint32_t latent_width = width / 8;
         const std::uint32_t latent_height = height / 8;
         const std::uint32_t latent_count =
@@ -64,28 +65,65 @@ public:
         GpuImage posterior = vae_encode(std::move(image));
         operators_.scale_values(
             posterior.buffer, latent_count, 0.18215f);
-        VulkanBuffer noise_buffer =
-            context_.create_device_buffer(latent_count * sizeof(float));
+        GpuImage target{
+            context_.create_device_buffer(latent_count * sizeof(float)),
+            4, latent_height, latent_width};
         context_.upload(
-            noise_buffer, target_noise, latent_count * sizeof(float));
-        GpuImage sample{
-            context_.create_device_buffer(
-                std::uint64_t(latent_count) * 2 * sizeof(float)),
-            8, latent_height, latent_width};
-        operators_.concatenate(
-            sample.buffer, posterior.buffer, noise_buffer,
-            latent_count, latent_count);
-        GpuImage prediction = unet_predict(std::move(sample));
-        operators_.scheduler_target(
-            prediction.buffer, noise_buffer, latent_count);
-        return vae_decode(std::move(prediction));
+            target.buffer, target_noise, latent_count * sizeof(float));
+        if (!full_v1) {
+            GpuImage sample{
+                context_.create_device_buffer(
+                    std::uint64_t(latent_count) * 2 * sizeof(float)),
+                8, latent_height, latent_width};
+            operators_.concatenate(
+                sample.buffer, posterior.buffer, target.buffer,
+                latent_count, latent_count);
+            GpuImage prediction = unet_predict(std::move(sample), 999);
+            operators_.scheduler_target(
+                prediction.buffer, target.buffer, latent_count);
+            return vae_decode(std::move(prediction));
+        }
+        constexpr std::array<std::uint32_t, 10> timesteps = {
+            901, 801, 701, 601, 501, 401, 301, 201, 101, 1};
+        constexpr std::array<float, 11> alpha_products = {
+            0.014004888944327831f, 0.0365464948117733f,
+            0.08191665261983871f, 0.15981632471084595f,
+            0.27499884366989136f, 0.4228813052177429f,
+            0.5888184309005737f, 0.7521430850028992f,
+            0.8929802179336548f, 0.9982960224151611f,
+            0.9991499781608582f};
+        for (std::size_t schedule = 0;
+             schedule < timesteps.size(); ++schedule) {
+            const std::uint32_t timestep = timesteps[schedule];
+            GpuImage sample{
+                context_.create_device_buffer(
+                    std::uint64_t(latent_count) * 2 * sizeof(float)),
+                8, latent_height, latent_width};
+            operators_.concatenate(
+                sample.buffer, posterior.buffer, target.buffer,
+                latent_count, latent_count);
+            GpuImage prediction =
+                unet_predict(std::move(sample), timestep);
+            GpuImage next{
+                context_.create_device_buffer(
+                    latent_count * sizeof(float)),
+                4, latent_height, latent_width};
+            operators_.ddim_step(
+                next.buffer, prediction.buffer, target.buffer,
+                latent_count, alpha_products[schedule],
+                alpha_products[schedule + 1]);
+            target = std::move(next);
+        }
+        operators_.scale_values(
+            target.buffer, latent_count, 1.0f / 0.18215f);
+        return vae_decode(std::move(target));
     }
 
     GpuImage test_encode(GpuImage&& image) {
         return vae_encode(std::move(image));
     }
     GpuImage test_predict(GpuImage&& sample) {
-        return unet_predict(std::move(sample));
+        return unet_predict(std::move(sample), 999);
     }
     GpuImage test_decode(GpuImage&& latent) {
         return vae_decode(std::move(latent));
@@ -434,13 +472,15 @@ private:
             prefix + ".linear_2.bias");
     }
 
-    GpuTokens time_embedding() {
+    GpuTokens time_embedding(std::uint32_t timestep_value) {
         std::vector<float> values(320);
         for (std::uint32_t i = 0; i < 160; ++i) {
             const float frequency = std::exp(
                 -std::log(10000.0f) * static_cast<float>(i) / 160.0f);
-            values[i] = std::cos(999.0f * frequency);
-            values[160 + i] = std::sin(999.0f * frequency);
+            values[i] = std::cos(
+                static_cast<float>(timestep_value) * frequency);
+            values[160 + i] = std::sin(
+                static_cast<float>(timestep_value) * frequency);
         }
         GpuTokens timestep{
             context_.create_device_buffer(values.size() * sizeof(float)),
@@ -569,8 +609,10 @@ private:
         return result;
     }
 
-    GpuImage unet_predict(GpuImage&& sample) {
-        GpuTokens time = time_embedding();
+    GpuImage unet_predict(
+        GpuImage&& sample,
+        std::uint32_t timestep) {
+        GpuTokens time = time_embedding(timestep);
         GpuImage hidden = conv(
             unet_, std::move(sample), "conv_in.weight", "conv_in.bias");
         std::vector<GpuImage> skips;
@@ -659,10 +701,10 @@ VulkanBuffer marigold_infer_gpu(
     VulkanContext& context, GpuModel& unet, GpuModel& vae,
     VulkanOperators& operators, const TokenTensor& prompt,
     const float* rgb, std::uint32_t width, std::uint32_t height,
-    const float* target_noise) {
+    const float* target_noise, bool full_v1) {
     Graph graph(context, unet, vae, operators, prompt);
     GpuImage decoded = graph.run(
-        rgb, width, height, target_noise);
+        rgb, width, height, target_noise, full_v1);
     VulkanBuffer depth = context.create_device_buffer(
         std::uint64_t(width) * height * sizeof(float));
     operators.depth_output(

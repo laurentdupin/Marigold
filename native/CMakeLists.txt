@@ -49,7 +49,8 @@ if(MARIGOLD_WITH_VULKAN)
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb
-            posterior_sample scale_values depth_output scheduler_target)
+            posterior_sample scale_values depth_output scheduler_target
+            ddim_step)
         marigold_compile_shader(${SHADER})
     endforeach()
 endif()

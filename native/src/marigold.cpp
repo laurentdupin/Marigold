@@ -12,6 +12,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <random>
@@ -22,6 +23,7 @@
 struct marigold_context {
     std::unique_ptr<marigold_native::ModelBundle> model;
     marigold_native::TokenTensor prompt;
+    marigold_model_variant variant = MARIGOLD_MODEL_LCM_V1;
 #if defined(MARIGOLD_WITH_VULKAN)
     std::unique_ptr<marigold_native::VulkanContext> vulkan;
     std::unique_ptr<marigold_native::GpuModel> gpu_unet;
@@ -49,7 +51,8 @@ marigold_native::ImageTensor infer(
     const float* rgb,
     std::uint32_t width,
     std::uint32_t height,
-    const float* target_noise) {
+    const float* target_noise,
+    marigold_model_variant variant) {
     if (width < 8 || height < 8) {
         throw std::invalid_argument("Marigold input dimensions are too small");
     }
@@ -73,34 +76,84 @@ marigold_native::ImageTensor infer(
         value *= 0.18215f;
     }
     const std::uint64_t latent_elements = posterior.mean.values.size();
-    marigold_native::ImageTensor sample{
-        8, posterior.mean.height, posterior.mean.width, {}};
-    sample.values.reserve(static_cast<std::size_t>(latent_elements * 2));
-    sample.values.insert(
-        sample.values.end(),
-        posterior.mean.values.begin(), posterior.mean.values.end());
-    sample.values.insert(
-        sample.values.end(),
-        target_noise, target_noise + latent_elements);
-    const marigold_native::ImageTensor prediction =
-        marigold_native::unet_predict(
-            context.model->unet(), sample, 999, context.prompt);
-
-    constexpr float alpha = 0.00466009508818388f;
-    constexpr float c_skip = 2.505007534736592e-9f;
-    constexpr float c_out = 1.0f;
-    const float sqrt_alpha = std::sqrt(alpha);
-    const float sqrt_beta = std::sqrt(1.0f - alpha);
     marigold_native::ImageTensor target{
         4, posterior.mean.height, posterior.mean.width,
         std::vector<float>(static_cast<std::size_t>(latent_elements))};
-    for (std::uint64_t i = 0; i < latent_elements; ++i) {
-        const float original =
-            sqrt_alpha * target_noise[i] -
-            sqrt_beta * prediction.values[i];
-        target.values[i] =
-            c_out * original + c_skip * target_noise[i];
-        target.values[i] /= 0.18215f;
+    std::copy(
+        target_noise, target_noise + latent_elements, target.values.begin());
+    if (variant == MARIGOLD_MODEL_LCM_V1) {
+        marigold_native::ImageTensor sample{
+            8, posterior.mean.height, posterior.mean.width, {}};
+        sample.values.reserve(static_cast<std::size_t>(latent_elements * 2));
+        sample.values.insert(
+            sample.values.end(),
+            posterior.mean.values.begin(), posterior.mean.values.end());
+        sample.values.insert(
+            sample.values.end(),
+            target.values.begin(), target.values.end());
+        const marigold_native::ImageTensor prediction =
+            marigold_native::unet_predict(
+                context.model->unet(), sample, 999, context.prompt);
+        constexpr float alpha = 0.00466009508818388f;
+        constexpr float c_skip = 2.505007534736592e-9f;
+        constexpr float c_out = 1.0f;
+        const float sqrt_alpha = std::sqrt(alpha);
+        const float sqrt_beta = std::sqrt(1.0f - alpha);
+        for (std::uint64_t i = 0; i < latent_elements; ++i) {
+            const float original =
+                sqrt_alpha * target.values[i] -
+                sqrt_beta * prediction.values[i];
+            target.values[i] =
+                c_out * original + c_skip * target.values[i];
+        }
+    } else {
+        constexpr std::array<std::uint32_t, 10> timesteps = {
+            901, 801, 701, 601, 501, 401, 301, 201, 101, 1};
+        constexpr std::array<float, 11> alpha_products = {
+            0.014004888944327831f, 0.0365464948117733f,
+            0.08191665261983871f, 0.15981632471084595f,
+            0.27499884366989136f, 0.4228813052177429f,
+            0.5888184309005737f, 0.7521430850028992f,
+            0.8929802179336548f, 0.9982960224151611f,
+            0.9991499781608582f};
+        for (std::size_t schedule = 0;
+             schedule < timesteps.size(); ++schedule) {
+            const std::uint32_t timestep = timesteps[schedule];
+            marigold_native::ImageTensor sample{
+                8, posterior.mean.height, posterior.mean.width, {}};
+            sample.values.reserve(
+                static_cast<std::size_t>(latent_elements * 2));
+            sample.values.insert(
+                sample.values.end(),
+                posterior.mean.values.begin(), posterior.mean.values.end());
+            sample.values.insert(
+                sample.values.end(),
+                target.values.begin(), target.values.end());
+            const marigold_native::ImageTensor prediction =
+                marigold_native::unet_predict(
+                    context.model->unet(), sample, timestep, context.prompt);
+            const float alpha = alpha_products[schedule];
+            const float previous_alpha = alpha_products[schedule + 1];
+            const float sqrt_alpha = std::sqrt(alpha);
+            const float sqrt_beta = std::sqrt(1.0f - alpha);
+            const float sqrt_previous_alpha = std::sqrt(previous_alpha);
+            const float sqrt_previous_beta =
+                std::sqrt(1.0f - previous_alpha);
+            for (std::uint64_t i = 0; i < latent_elements; ++i) {
+                const float original =
+                    sqrt_alpha * target.values[i] -
+                    sqrt_beta * prediction.values[i];
+                const float epsilon =
+                    sqrt_alpha * prediction.values[i] +
+                    sqrt_beta * target.values[i];
+                target.values[i] =
+                    sqrt_previous_alpha * original +
+                    sqrt_previous_beta * epsilon;
+            }
+        }
+    }
+    for (float& value : target.values) {
+        value /= 0.18215f;
     }
     return marigold_native::vae_decode(context.model->vae(), target);
 }
@@ -278,10 +331,27 @@ int marigold_create(
     const char* derived_vae,
     const char* prompt_cache,
     marigold_context** output) {
+    return marigold_create_variant(
+        snapshot, derived_vae, prompt_cache,
+        MARIGOLD_MODEL_LCM_V1, output);
+}
+
+int marigold_create_variant(
+    const char* snapshot,
+    const char* derived_vae,
+    const char* prompt_cache,
+    marigold_model_variant variant,
+    marigold_context** output) {
     if (!snapshot || !derived_vae || !prompt_cache || !output) {
         return fail(
             MARIGOLD_INVALID_ARGUMENT,
             "invalid Marigold create argument");
+    }
+    if (variant != MARIGOLD_MODEL_LCM_V1 &&
+        variant != MARIGOLD_MODEL_FULL_V1) {
+        return fail(
+            MARIGOLD_INVALID_ARGUMENT,
+            "invalid Marigold model variant");
     }
     *output = nullptr;
     try {
@@ -289,8 +359,9 @@ int marigold_create(
         context->model =
             std::make_unique<marigold_native::ModelBundle>(
                 snapshot, derived_vae);
-        context->prompt =
-            marigold_native::load_empty_prompt_cache(prompt_cache);
+        context->variant = variant;
+        context->prompt = marigold_native::load_empty_prompt_cache(
+            prompt_cache, variant == MARIGOLD_MODEL_FULL_V1);
         *output = context.release();
         last_error.clear();
         return MARIGOLD_OK;
@@ -305,10 +376,28 @@ int marigold_create_vulkan(
     const char* prompt_cache,
     std::uint32_t device_index,
     marigold_context** output) {
+    return marigold_create_vulkan_variant(
+        snapshot, derived_vae, prompt_cache,
+        MARIGOLD_MODEL_LCM_V1, device_index, output);
+}
+
+int marigold_create_vulkan_variant(
+    const char* snapshot,
+    const char* derived_vae,
+    const char* prompt_cache,
+    marigold_model_variant variant,
+    std::uint32_t device_index,
+    marigold_context** output) {
     if (!snapshot || !derived_vae || !prompt_cache || !output) {
         return fail(
             MARIGOLD_INVALID_ARGUMENT,
             "invalid Marigold create argument");
+    }
+    if (variant != MARIGOLD_MODEL_LCM_V1 &&
+        variant != MARIGOLD_MODEL_FULL_V1) {
+        return fail(
+            MARIGOLD_INVALID_ARGUMENT,
+            "invalid Marigold model variant");
     }
     *output = nullptr;
 #if !defined(MARIGOLD_WITH_VULKAN)
@@ -321,8 +410,9 @@ int marigold_create_vulkan(
         context->model =
             std::make_unique<marigold_native::ModelBundle>(
                 snapshot, derived_vae);
-        context->prompt =
-            marigold_native::load_empty_prompt_cache(prompt_cache);
+        context->variant = variant;
+        context->prompt = marigold_native::load_empty_prompt_cache(
+            prompt_cache, variant == MARIGOLD_MODEL_FULL_V1);
         context->vulkan =
             std::make_unique<marigold_native::VulkanContext>(device_index);
         context->gpu_unet = std::make_unique<marigold_native::GpuModel>(
@@ -364,7 +454,8 @@ int marigold_infer_rgb_f32_with_noise(
                 marigold_native::marigold_infer_gpu(
                     *context->vulkan, *context->gpu_unet,
                     *context->gpu_vae, *context->operators,
-                    context->prompt, rgb, width, height, target_noise);
+                    context->prompt, rgb, width, height, target_noise,
+                    context->variant == MARIGOLD_MODEL_FULL_V1);
             context->vulkan->download(
                 output, depth,
                 std::uint64_t(width) * height * sizeof(float));
@@ -373,7 +464,9 @@ int marigold_infer_rgb_f32_with_noise(
         }
 #endif
         output_depth(
-            infer(*context, rgb, width, height, target_noise),
+            infer(
+                *context, rgb, width, height, target_noise,
+                context->variant),
             width, height, depth);
         last_error.clear();
         return MARIGOLD_OK;

@@ -24,7 +24,8 @@ VulkanBuffer marigold_infer_gpu(
     const float* rgb,
     std::uint32_t width,
     std::uint32_t height,
-    const float* target_noise);
+    const float* target_noise,
+    bool full_v1);
 
 GpuImage marigold_vae_encode_gpu(
     VulkanContext& context, GpuModel& vae, VulkanOperators& operators,
