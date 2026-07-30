@@ -78,8 +78,13 @@ endif()
 target_include_directories(marigold_model PUBLIC src)
 set_target_properties(marigold_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(marigold_native SHARED src/marigold.cpp)
-target_compile_definitions(marigold_native PRIVATE MARIGOLD_NATIVE_BUILD)
+add_library(marigold_native SHARED
+    src/marigold.cpp
+    src/inferbridge_harness.cpp)
+target_compile_definitions(
+    marigold_native PRIVATE
+        MARIGOLD_NATIVE_BUILD
+        INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 target_include_directories(marigold_native PUBLIC include)
 target_link_libraries(marigold_native PRIVATE marigold_model)
 set_target_properties(
@@ -107,8 +112,28 @@ target_link_libraries(marigold_size_probe PRIVATE marigold_native)
 add_executable(marigold_c_abi_smoke tests/c_abi_smoke.c)
 target_include_directories(marigold_c_abi_smoke PRIVATE include)
 target_link_libraries(marigold_c_abi_smoke PRIVATE marigold_native)
+add_executable(
+    marigold_harness_abi_smoke tests/harness_abi_smoke.c)
+target_include_directories(
+    marigold_harness_abi_smoke PRIVATE include)
+target_link_libraries(
+    marigold_harness_abi_smoke PRIVATE marigold_native)
+add_executable(
+    marigold_harness_full_graph tests/harness_full_graph.cpp)
+target_include_directories(
+    marigold_harness_full_graph PRIVATE include)
+target_link_libraries(
+    marigold_harness_full_graph PRIVATE marigold_native)
 
 enable_testing()
 add_test(NAME marigold_model_probe_usage COMMAND marigold_model_probe)
 set_tests_properties(marigold_model_probe_usage PROPERTIES WILL_FAIL TRUE)
 add_test(NAME marigold_c_abi_smoke COMMAND marigold_c_abi_smoke)
+add_test(
+    NAME marigold_harness_abi_smoke
+    COMMAND marigold_harness_abi_smoke)
+add_test(
+    NAME marigold_harness_full_graph
+    COMMAND marigold_harness_full_graph)
+set_tests_properties(
+    marigold_harness_full_graph PROPERTIES SKIP_RETURN_CODE 77)

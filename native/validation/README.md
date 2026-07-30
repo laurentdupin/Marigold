@@ -118,3 +118,38 @@ and VAE decode remain on Vulkan.
 The 768x64 full-v1 BGRA image-contract equivalence canary passed on all
 three GPUs with exactly zero maximum and mean absolute difference versus the
 validated tensor path plus InferBridge normalization.
+
+## Embedded InferBridge harness
+
+The same DLL now exports `ibrh_get_api` for InferBridge harness ABI 1.0. It
+accepts a host-memory BGRA8 capture and returns a leased host-memory FP32
+depth image at `marigold_inferbridge_image_shape` dimensions. Correlation
+metadata is preserved, and releasing the job does not invalidate an acquired
+output lease.
+
+The single Marigold model entry selects its LCM or full-v1 canonical snapshot
+through `Checkpoint`. `model_path` names that selected snapshot, while
+`VaeModel` and `PromptCache` identify the safe VAE representation and tiny
+content-bound empty-prompt cache associated with it. These are backend cache
+artifacts for the shared canonical weight, not duplicate model entries or
+downloads. The LCM VAE remains an unavoidable safe derivation from its
+canonical PyTorch archive; full-v1 maps its canonical VAE Safetensors
+directly.
+
+The Python worker fixes its generator seed to `12345`; the harness uses the
+same default and accepts an optional unsigned `Seed` override for validation.
+Both output paths preserve the worker's antialiased resize,
+`match_input_res=false` dimensions, and `(depth-min)/(1-min)` normalization.
+
+Capability reporting advertises only host input/output and one synchronous
+in-flight job. The complete selected graph runs on the requested Vulkan
+device, but capture upload and depth readback are still host boundaries.
+External GPU resources, asynchronous completion, and cancellation are not
+advertised.
+
+The Windows Release ABI and full-graph harness gates pass for both
+`prs-eth/marigold-lcm-v1-0` and `prs-eth/marigold-v1-0` on the RX 9070.
+They cover the 768x64 image contract, model/sidecar binding, fixed seed,
+normalization, correlation, and output-lease lifetime. The underlying exact
+image/tensor comparisons remain validated on all three GPUs as reported
+above.
