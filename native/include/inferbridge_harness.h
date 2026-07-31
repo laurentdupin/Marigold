@@ -200,6 +200,7 @@ typedef struct ibrh_port_descriptor {
     uint32_t height;
     uint32_t depth;
     uint32_t flags;
+    uint64_t accepted_pixel_format_mask;
 } ibrh_port_descriptor;
 
 typedef struct ibrh_model_io_descriptor {

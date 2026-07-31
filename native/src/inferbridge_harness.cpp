@@ -509,6 +509,9 @@ ibrh_result IBRH_CALL model_get_port(
     descriptor->semantic = direction == IBRH_PORT_INPUT ? IBRH_SEMANTIC_IMAGE : IBRH_SEMANTIC_DEPTH;
     descriptor->payload_type = direction == IBRH_PORT_INPUT ? IBRH_PIXEL_BGRA8 : IBRH_PIXEL_DEPTH_FLOAT32;
     descriptor->pixel_format = descriptor->payload_type;
+    descriptor->accepted_pixel_format_mask = direction == IBRH_PORT_INPUT ?
+        (1ull << IBRH_PIXEL_BGRA8) | (1ull << IBRH_PIXEL_RGBA8) :
+        (1ull << IBRH_PIXEL_DEPTH_FLOAT32);
     descriptor->resource_kind = IBRH_RESOURCE_KIND_IMAGE_2D;
     descriptor->depth = 1u;
     descriptor->flags = IBRH_DESCRIPTOR_DYNAMIC_WIDTH | IBRH_DESCRIPTOR_DYNAMIC_HEIGHT;
