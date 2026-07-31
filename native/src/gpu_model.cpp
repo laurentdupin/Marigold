@@ -83,6 +83,7 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
         GpuTensor destination{
             context.create_device_buffer(bytes),
             {},
+            {},
             source.dimensions,
             source.rank,
             source.elements,
@@ -93,6 +94,58 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
             converted[static_cast<std::size_t>(index)] = source.data[index];
         }
         context.upload(destination.buffer, converted.data(), bytes);
+        if (context.subgroup_size() == 64 &&
+            source.rank == 4 &&
+            source.dimensions[2] == 3 &&
+            source.dimensions[3] == 3) {
+            const std::size_t output_channels =
+                static_cast<std::size_t>(source.dimensions[0]);
+            const std::size_t input_channels =
+                static_cast<std::size_t>(source.dimensions[1]);
+            std::vector<float> transformed(
+                output_channels * input_channels * 16);
+            for (std::size_t output = 0;
+                 output < output_channels;
+                 ++output) {
+                for (std::size_t input = 0;
+                     input < input_channels;
+                     ++input) {
+                    const float* kernel = converted.data() +
+                        (output * input_channels + input) * 9;
+                    float temporary[4][3];
+                    for (std::size_t column = 0; column < 3; ++column) {
+                        temporary[0][column] = kernel[column];
+                        temporary[1][column] = 0.5f * (
+                            kernel[column] + kernel[3 + column] +
+                            kernel[6 + column]);
+                        temporary[2][column] = 0.5f * (
+                            kernel[column] - kernel[3 + column] +
+                            kernel[6 + column]);
+                        temporary[3][column] = kernel[6 + column];
+                    }
+                    float* destination_values =
+                        transformed.data() +
+                        (output * input_channels + input) * 16;
+                    for (std::size_t row = 0; row < 4; ++row) {
+                        destination_values[row * 4] = temporary[row][0];
+                        destination_values[row * 4 + 1] = 0.5f * (
+                            temporary[row][0] + temporary[row][1] +
+                            temporary[row][2]);
+                        destination_values[row * 4 + 2] = 0.5f * (
+                            temporary[row][0] - temporary[row][1] +
+                            temporary[row][2]);
+                        destination_values[row * 4 + 3] =
+                            temporary[row][2];
+                    }
+                }
+            }
+            destination.winograd_buffer = context.create_device_buffer(
+                transformed.size() * sizeof(float));
+            context.upload(
+                destination.winograd_buffer,
+                transformed.data(),
+                transformed.size() * sizeof(float));
+        }
         if (!tensors_.emplace(name, std::move(destination)).second) {
             throw std::runtime_error(
                 "duplicate GPU tensor name: " + std::string(name));
@@ -136,6 +189,12 @@ void GpuModel::retain_dpt_precision(bool half_weight) {
         GpuTensor& tensor = entry.second;
         context_.discard(
             half_weight ? tensor.buffer : tensor.half_buffer);
+    }
+}
+
+void GpuModel::discard_winograd() {
+    for (auto& entry : tensors_) {
+        context_.discard(entry.second.winograd_buffer);
     }
 }
 

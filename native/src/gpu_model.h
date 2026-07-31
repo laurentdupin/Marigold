@@ -13,6 +13,7 @@ namespace marigold_native {
 struct GpuTensor {
     VulkanBuffer buffer;
     VulkanBuffer half_buffer;
+    VulkanBuffer winograd_buffer;
     std::array<std::uint64_t, 4> dimensions{};
     std::uint32_t rank = 0;
     std::uint64_t elements = 0;
@@ -25,6 +26,7 @@ public:
     const GpuTensor& tensor(std::string_view name) const;
     void retain_transformer_precision(bool half_weight);
     void retain_dpt_precision(bool half_weight);
+    void discard_winograd();
     std::size_t tensor_count() const { return tensors_.size(); }
 
 private:

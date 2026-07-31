@@ -95,7 +95,7 @@ public:
         std::uint32_t input_channels, std::uint32_t output_channels,
         std::uint32_t kernel, std::uint32_t stride,
         std::uint32_t pad_before, std::uint32_t pad_after,
-        bool has_bias);
+        bool has_bias, bool winograd = false);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -210,6 +210,7 @@ private:
     VulkanPipeline conv2d8_tiled_;
     VulkanPipeline conv2d8_stride2_tiled_;
     VulkanPipeline conv2d8_tiled16x8_;
+    VulkanPipeline conv2d_winograd_;
     VulkanPipeline conv_transpose_nonoverlap_;
     VulkanPipeline conv_transpose_nonoverlap_half_;
     VulkanPipeline bilinear_align_true_;

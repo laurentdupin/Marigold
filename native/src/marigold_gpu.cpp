@@ -1,5 +1,6 @@
 #include "marigold_gpu.h"
 
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <stdexcept>
@@ -46,6 +47,50 @@ public:
     }
 
     GpuImage run(
+        const float* rgb, std::uint32_t width, std::uint32_t height,
+        const float* target_noise, bool full_v1) {
+        if (winograd_selected_) {
+            return run_impl(rgb, width, height, target_noise, full_v1);
+        }
+        const bool available = tensor(
+            vae_, "decoder.up_blocks.3.resnets.0.conv1.weight")
+                .winograd_buffer.handle() != VK_NULL_HANDLE;
+        if (!available) {
+            winograd_enabled_ = false;
+            winograd_selected_ = true;
+            return run_impl(rgb, width, height, target_noise, full_v1);
+        }
+        winograd_enabled_ = false;
+        GpuImage direct_warmup =
+            run_impl(rgb, width, height, target_noise, full_v1);
+        winograd_enabled_ = true;
+        GpuImage winograd_warmup =
+            run_impl(rgb, width, height, target_noise, full_v1);
+        winograd_enabled_ = false;
+        const auto direct_start = std::chrono::steady_clock::now();
+        GpuImage direct =
+            run_impl(rgb, width, height, target_noise, full_v1);
+        const double direct_time =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - direct_start).count();
+        winograd_enabled_ = true;
+        const auto winograd_start = std::chrono::steady_clock::now();
+        GpuImage winograd =
+            run_impl(rgb, width, height, target_noise, full_v1);
+        const double winograd_time =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - winograd_start).count();
+        winograd_enabled_ = winograd_time < direct_time * 0.98;
+        winograd_selected_ = true;
+        if (!winograd_enabled_) {
+            unet_.discard_winograd();
+            vae_.discard_winograd();
+            return direct;
+        }
+        return winograd;
+    }
+
+    GpuImage run_impl(
         const float* rgb, std::uint32_t width, std::uint32_t height,
         const float* target_noise, bool full_v1) {
         const std::uint32_t latent_width = width / 8;
@@ -174,12 +219,18 @@ private:
                 std::uint64_t(output_channels) * output_width *
                 output_height * sizeof(float)),
             output_channels, output_height, output_width};
+        const bool winograd =
+            winograd_enabled_ &&
+            kernel_size == 3 && stride == 1 &&
+            pad_before == 1 && pad_after == 1 &&
+            kernel.winograd_buffer.handle() != VK_NULL_HANDLE;
         operators_.conv2d_asymmetric(
-            output.buffer, input.buffer, kernel.buffer,
+            output.buffer, input.buffer,
+            winograd ? kernel.winograd_buffer : kernel.buffer,
             bias_name.empty() ? zero_bias_ : tensor(model, bias_name).buffer,
             input.width, input.height, input.channels, output_channels,
             kernel_size, stride, pad_before, pad_after,
-            !bias_name.empty());
+            !bias_name.empty(), winograd);
         return output;
     }
 
@@ -689,6 +740,8 @@ private:
     }
 
     VulkanContext& context_;
+    bool winograd_enabled_ = false;
+    bool winograd_selected_ = false;
     GpuModel& unet_;
     GpuModel& vae_;
     VulkanOperators& operators_;

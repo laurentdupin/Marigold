@@ -51,6 +51,7 @@ if(MARIGOLD_WITH_VULKAN)
             conv2d conv2d8 conv2d_half conv2d8_half conv2d8_tiled
             conv2d8_stride2_tiled
             conv2d8_tiled16x8
+            conv2d_winograd
             conv_transpose_nonoverlap conv_transpose_nonoverlap_half
             elementwise gelu layer_norm linear linear16 linear_half
             linear16_half linear_vec8 prepare_tokens position_bicubic project_tokens
