@@ -95,7 +95,8 @@ public:
         std::uint32_t input_channels, std::uint32_t output_channels,
         std::uint32_t kernel, std::uint32_t stride,
         std::uint32_t pad_before, std::uint32_t pad_after,
-        bool has_bias, bool winograd = false);
+        bool has_bias, bool winograd = false,
+        bool half_weight = false);
 
     void conv_transpose_nonoverlap(
         VulkanBuffer& output,
@@ -137,7 +138,7 @@ public:
     void group_norm(
         VulkanBuffer& values, const VulkanBuffer& scale,
         const VulkanBuffer& bias, std::uint32_t channels,
-        std::uint32_t spatial, float epsilon);
+        std::uint32_t spatial, float epsilon, bool silu = false);
     void silu(VulkanBuffer& values, std::uint32_t count);
     void nearest(
         VulkanBuffer& output, const VulkanBuffer& input,
@@ -189,6 +190,7 @@ private:
     VulkanPipeline linear_half_;
     VulkanPipeline linear16_half_;
     VulkanPipeline linear_vec8_;
+    VulkanPipeline linear_vec8_half_;
     VulkanPipeline gelu_;
     VulkanPipeline layer_norm_;
     VulkanPipeline add_scaled_;
@@ -210,7 +212,9 @@ private:
     VulkanPipeline conv2d8_half_;
     VulkanPipeline conv2d8_tiled_;
     VulkanPipeline conv2d8_stride2_tiled_;
+    VulkanPipeline conv2d8_stride2_tiled_half_;
     VulkanPipeline conv2d8_tiled16x8_;
+    VulkanPipeline conv2d8_tiled16x8_half_;
     VulkanPipeline conv2d_winograd_;
     VulkanPipeline conv_transpose_nonoverlap_;
     VulkanPipeline conv_transpose_nonoverlap_half_;
@@ -218,6 +222,7 @@ private:
     VulkanPipeline bilinear_align_true_image_;
     VulkanPipeline relu_;
     VulkanPipeline group_norm_;
+    VulkanPipeline group_norm_silu_;
     VulkanPipeline silu_;
     VulkanPipeline nearest_;
     VulkanPipeline concatenate_;

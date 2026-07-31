@@ -91,6 +91,20 @@ passed with unchanged errors on every adapter; observed medians were
 `226.7 ms` (RX 9070), `625.9 ms` (GTX 1080), and `207.4 ms`
 (RX 6700 XT).
 
+## Wave32 packed-weight pass
+
+The Wave32 executor now uses input-major, output-contiguous packed FP16
+storage for linear and 3x3 convolution weights while preserving FP32
+activations and accumulation. It also uses bank-safe pointwise and linear
+tiles, fuses normalization with SiLU, avoids redundant ResNet residual
+copies, and computes the shared timestep activation once per denoising step.
+
+For the LCM 64x64 fixture, isolated persistent-context medians were
+`102.817 ms` on Radeon RX 9070, `107.026 ms` on GeForce GTX 1080
+(101 calls), and `97.069 ms` on Radeon RX 6700 XT. Relative L1 deviation
+remained below `0.000813` (`0.0813%`) on all three adapters, and maximum
+absolute deviation remained below `0.00301`.
+
 ## Full v1 checkpoint
 
 ABI 4 adds `marigold_create_variant` and

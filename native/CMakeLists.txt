@@ -24,7 +24,7 @@ if(MARIGOLD_WITH_VULKAN)
         set(HEADER "${MARIGOLD_GENERATED_DIR}/${NAME}_spv.h")
         add_custom_command(
             OUTPUT "${SPIRV}"
-            COMMAND Vulkan::glslc -fshader-stage=compute
+            COMMAND Vulkan::glslc -O -fshader-stage=compute
                 --target-env=vulkan1.3 --target-spv=spv1.6 -Werror
                 "-I${CMAKE_CURRENT_SOURCE_DIR}/src/shaders"
                 -o "${SPIRV}" "${SOURCE}"
@@ -49,14 +49,14 @@ if(MARIGOLD_WITH_VULKAN)
             add_scaled add add_position bilinear_align_true
             bilinear_align_true_image bmm bmm_score_half bmm_value_half
             conv2d conv2d_pointwise_gemm conv2d8 conv2d_half conv2d8_half conv2d8_tiled
-            conv2d8_stride2_tiled
-            conv2d8_tiled16x8
+            conv2d8_stride2_tiled conv2d8_stride2_tiled_half
+            conv2d8_tiled16x8 conv2d8_tiled16x8_half
             conv2d_winograd
             conv_transpose_nonoverlap conv_transpose_nonoverlap_half
             elementwise gelu layer_norm linear linear16 linear_half
-            linear16_half linear_vec8 prepare_tokens position_bicubic project_tokens
+            linear16_half linear_vec8 linear_vec8_half prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
-            group_norm silu nearest concatenate add_channel nchw_tokens
+            group_norm group_norm_silu silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb
             posterior_sample scale_values depth_output scheduler_target
             ddim_step)

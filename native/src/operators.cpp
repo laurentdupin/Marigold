@@ -15,7 +15,9 @@
 #include "conv2d8_half_spv.h"
 #include "conv2d8_tiled_spv.h"
 #include "conv2d8_stride2_tiled_spv.h"
+#include "conv2d8_stride2_tiled_half_spv.h"
 #include "conv2d8_tiled16x8_spv.h"
+#include "conv2d8_tiled16x8_half_spv.h"
 #include "conv2d_winograd_spv.h"
 #include "conv_transpose_nonoverlap_spv.h"
 #include "conv_transpose_nonoverlap_half_spv.h"
@@ -26,6 +28,7 @@
 #include "linear_half_spv.h"
 #include "linear16_half_spv.h"
 #include "linear_vec8_spv.h"
+#include "linear_vec8_half_spv.h"
 #include "prepare_tokens_spv.h"
 #include "position_bicubic_spv.h"
 #include "project_tokens_spv.h"
@@ -34,6 +37,7 @@
 #include "softmax_lastdim_spv.h"
 #include "softmax_lastdim_half_spv.h"
 #include "group_norm_spv.h"
+#include "group_norm_silu_spv.h"
 #include "silu_spv.h"
 #include "nearest_spv.h"
 #include "concatenate_spv.h"
@@ -104,6 +108,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_linear_vec8_spv_size,
           4,
           12)),
+      linear_vec8_half_(context.create_pipeline(
+          marigold_linear_vec8_half_spv,
+          marigold_linear_vec8_half_spv_size, 4, 12)),
       gelu_(context.create_pipeline(
           marigold_gelu_spv, marigold_gelu_spv_size, 2, 4)),
       layer_norm_(context.create_pipeline(
@@ -193,11 +200,17 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_conv2d8_stride2_tiled_spv_size,
           4,
           48)),
+      conv2d8_stride2_tiled_half_(context.create_pipeline(
+          marigold_conv2d8_stride2_tiled_half_spv,
+          marigold_conv2d8_stride2_tiled_half_spv_size, 4, 48)),
       conv2d8_tiled16x8_(context.create_pipeline(
           marigold_conv2d8_tiled16x8_spv,
           marigold_conv2d8_tiled16x8_spv_size,
           4,
           48)),
+      conv2d8_tiled16x8_half_(context.create_pipeline(
+          marigold_conv2d8_tiled16x8_half_spv,
+          marigold_conv2d8_tiled16x8_half_spv_size, 4, 48)),
       conv2d_winograd_(context.create_pipeline(
           marigold_conv2d_winograd_spv,
           marigold_conv2d_winograd_spv_size,
@@ -230,6 +243,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_relu_spv, marigold_relu_spv_size, 2, 4)),
       group_norm_(context.create_pipeline(
           marigold_group_norm_spv, marigold_group_norm_spv_size, 3, 16)),
+      group_norm_silu_(context.create_pipeline(
+          marigold_group_norm_silu_spv,
+          marigold_group_norm_silu_spv_size, 3, 16)),
       silu_(context.create_pipeline(
           marigold_silu_spv, marigold_silu_spv_size, 1, 4)),
       nearest_(context.create_pipeline(
@@ -268,6 +284,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     linear_half_.set_debug_name("linear_half");
     linear16_half_.set_debug_name("linear16_half");
     linear_vec8_.set_debug_name("linear_vec8");
+    linear_vec8_half_.set_debug_name("linear_vec8_half");
     gelu_.set_debug_name("gelu");
     layer_norm_.set_debug_name("layer_norm");
     add_scaled_.set_debug_name("add_scaled");
@@ -292,7 +309,11 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     conv2d8_tiled_.set_debug_name("conv2d8_tiled");
     conv2d8_stride2_tiled_.set_debug_name(
         "conv2d8_stride2_tiled");
+    conv2d8_stride2_tiled_half_.set_debug_name(
+        "conv2d8_stride2_tiled_half");
     conv2d8_tiled16x8_.set_debug_name("conv2d8_tiled16x8");
+    conv2d8_tiled16x8_half_.set_debug_name(
+        "conv2d8_tiled16x8_half");
     conv2d_winograd_.set_debug_name("conv2d_winograd");
     conv_transpose_nonoverlap_.set_debug_name(
         "conv_transpose_nonoverlap");
@@ -304,6 +325,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
         "bilinear_align_true_image");
     relu_.set_debug_name("relu");
     group_norm_.set_debug_name("group_norm");
+    group_norm_silu_.set_debug_name("group_norm_silu");
     silu_.set_debug_name("silu");
     nearest_.set_debug_name("nearest");
     concatenate_.set_debug_name("concatenate");
@@ -351,16 +373,20 @@ void VulkanOperators::linear(
         std::uint32_t output_columns;
     } parameters{rows, input_columns, output_columns};
     context_.dispatch(
-        !half_weight && context_.subgroup_size() == 32
-            ? linear_vec8_
+        context_.subgroup_size() == 32
+            ? (half_weight ? linear_vec8_half_ : linear_vec8_)
             : (half_weight
             ? (block16 ? linear16_half_ : linear_half_)
             : (block16 ? linear16_ : linear_)),
         {&output, &input, &weight, &bias},
         &parameters,
         sizeof(parameters),
-        divide_up(divide_up(output_columns, 4), 8),
-        divide_up(divide_up(rows, 4), 8));
+        context_.subgroup_size() == 32
+            ? divide_up(output_columns, 64)
+            : divide_up(divide_up(output_columns, 4), 8),
+        context_.subgroup_size() == 32
+            ? divide_up(rows, 40)
+            : divide_up(divide_up(rows, 4), 8));
     if (gelu) {
         struct GeluParameters {
             std::uint32_t count;
@@ -836,7 +862,7 @@ void VulkanOperators::conv2d_asymmetric(
     std::uint32_t input_channels, std::uint32_t output_channels,
     std::uint32_t kernel, std::uint32_t stride,
     std::uint32_t pad_before, std::uint32_t pad_after,
-    bool has_bias, bool winograd) {
+    bool has_bias, bool winograd, bool half_weight) {
     const std::uint32_t output_width =
         (input_width + pad_before + pad_after - kernel) / stride + 1;
     const std::uint32_t output_height =
@@ -844,9 +870,13 @@ void VulkanOperators::conv2d_asymmetric(
     require_bytes(
         input, std::uint64_t(input_width) * input_height * input_channels,
         "convolution input");
-    require_bytes(
-        weight, std::uint64_t(output_channels) * input_channels *
-            kernel * kernel, "convolution weight");
+    const std::uint64_t weight_elements =
+        std::uint64_t(output_channels) * input_channels * kernel * kernel;
+    if (half_weight) {
+        require_half_elements(weight, weight_elements, "convolution weight");
+    } else {
+        require_bytes(weight, weight_elements, "convolution weight");
+    }
     require_bytes(bias, has_bias ? output_channels : 1, "convolution bias");
     require_bytes(
         output, std::uint64_t(output_width) * output_height *
@@ -881,17 +911,20 @@ void VulkanOperators::conv2d_asymmetric(
     context_.dispatch(
         pointwise ? conv2d_pointwise_gemm_ :
         (winograd ? conv2d_winograd_ :
-        (tiled ? conv2d8_tiled16x8_ :
-        (stride2_tiled ? conv2d8_stride2_tiled_ : conv2d_))),
+        (tiled ? (half_weight
+            ? conv2d8_tiled16x8_half_ : conv2d8_tiled16x8_) :
+        (stride2_tiled ? (half_weight
+            ? conv2d8_stride2_tiled_half_
+            : conv2d8_stride2_tiled_) : conv2d_))),
         {&output, &input, &weight, &bias},
         &parameters, sizeof(parameters),
         pointwise
-            ? divide_up(output_width * output_height, 32)
+            ? divide_up(output_width * output_height, 64)
             : (winograd
             ? divide_up(divide_up(output_width, 2), 8)
             : divide_up(output_width, tiled ? 16 : 8)),
         pointwise
-            ? divide_up(output_channels, 32)
+            ? divide_up(output_channels, 64)
             : (winograd
             ? divide_up(divide_up(output_height, 2), 8)
             : divide_up(output_height, 8)),
@@ -1064,7 +1097,7 @@ void VulkanOperators::add(
 void VulkanOperators::group_norm(
     VulkanBuffer& values, const VulkanBuffer& scale,
     const VulkanBuffer& bias, std::uint32_t channels,
-    std::uint32_t spatial, float epsilon) {
+    std::uint32_t spatial, float epsilon, bool silu) {
     if (channels == 0 || channels % 32 != 0 || spatial == 0) {
         throw std::invalid_argument("invalid group normalization dimensions");
     }
@@ -1076,7 +1109,8 @@ void VulkanOperators::group_norm(
         float epsilon;
     } parameters{channels, spatial, 32, epsilon};
     context_.dispatch(
-        group_norm_, {&values, &scale, &bias},
+        silu ? group_norm_silu_ : group_norm_,
+        {&values, &scale, &bias},
         &parameters, sizeof(parameters), 32);
 }
 

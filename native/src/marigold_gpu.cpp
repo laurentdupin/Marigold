@@ -192,9 +192,37 @@ private:
                 sizeof(float)),
             input.tokens, output_dimensions};
         operators_.linear(
-            output.buffer, input.buffer, kernel.buffer,
+            output.buffer, input.buffer,
+            context_.subgroup_size() == 32 &&
+                    kernel.half_buffer.handle() != VK_NULL_HANDLE
+                ? kernel.half_buffer : kernel.buffer,
             bias_name.empty() ? zero_bias_ : tensor(model, bias_name).buffer,
-            input.tokens, input.dimensions, output_dimensions, false);
+            input.tokens, input.dimensions, output_dimensions, false, false,
+            context_.subgroup_size() == 32 &&
+                kernel.half_buffer.handle() != VK_NULL_HANDLE);
+        return output;
+    }
+
+    GpuTokens linear_borrowed(
+        GpuModel& model, const GpuTokens& input,
+        const std::string& weight_name, const std::string& bias_name) {
+        const GpuTensor& kernel = tensor(model, weight_name);
+        const std::uint32_t output_dimensions =
+            static_cast<std::uint32_t>(kernel.dimensions[0]);
+        GpuTokens output{
+            context_.create_device_buffer(
+                std::uint64_t(input.tokens) * output_dimensions *
+                sizeof(float)),
+            input.tokens, output_dimensions};
+        const bool half_weight =
+            context_.subgroup_size() == 32 &&
+            kernel.half_buffer.handle() != VK_NULL_HANDLE;
+        operators_.linear(
+            output.buffer, input.buffer,
+            half_weight ? kernel.half_buffer : kernel.buffer,
+            tensor(model, bias_name).buffer,
+            input.tokens, input.dimensions, output_dimensions,
+            false, false, half_weight);
         return output;
     }
 
@@ -224,24 +252,31 @@ private:
             kernel_size == 3 && stride == 1 &&
             pad_before == 1 && pad_after == 1 &&
             kernel.winograd_buffer.handle() != VK_NULL_HANDLE;
+        const bool half_weight =
+            !winograd && kernel_size == 3 &&
+            kernel.half_buffer.handle() != VK_NULL_HANDLE &&
+            context_.subgroup_size() == 32 &&
+            ((stride == 1 && pad_before == 1 && pad_after == 1) ||
+             stride == 2);
         operators_.conv2d_asymmetric(
             output.buffer, input.buffer,
-            winograd ? kernel.winograd_buffer : kernel.buffer,
+            winograd ? kernel.winograd_buffer :
+                (half_weight ? kernel.half_buffer : kernel.buffer),
             bias_name.empty() ? zero_bias_ : tensor(model, bias_name).buffer,
             input.width, input.height, input.channels, output_channels,
             kernel_size, stride, pad_before, pad_after,
-            !bias_name.empty(), winograd);
+            !bias_name.empty(), winograd, half_weight);
         return output;
     }
 
     void group_norm(
         GpuModel& model, GpuImage& image,
         const std::string& weight_name, const std::string& bias_name,
-        float epsilon = 1.0e-6f) {
+        float epsilon = 1.0e-6f, bool silu = false) {
         operators_.group_norm(
             image.buffer, tensor(model, weight_name).buffer,
             tensor(model, bias_name).buffer, image.channels,
-            image.width * image.height, epsilon);
+            image.width * image.height, epsilon, silu);
     }
 
     GpuImage copy_image(const GpuImage& input) {
@@ -289,29 +324,28 @@ private:
         GpuImage hidden = copy_image(input);
         group_norm(
             vae_, hidden, prefix + ".norm1.weight",
-            prefix + ".norm1.bias");
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            prefix + ".norm1.bias", 1.0e-6f, true);
         hidden = conv(
             vae_, std::move(hidden), prefix + ".conv1.weight",
             prefix + ".conv1.bias");
         group_norm(
             vae_, hidden, prefix + ".norm2.weight",
-            prefix + ".norm2.bias");
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            prefix + ".norm2.bias", 1.0e-6f, true);
         hidden = conv(
             vae_, std::move(hidden), prefix + ".conv2.weight",
             prefix + ".conv2.bias");
-        GpuImage residual = tensor_exists(
-            vae_, prefix + ".conv_shortcut.weight")
-            ? conv(
-                vae_, copy_image(input), prefix + ".conv_shortcut.weight",
-                prefix + ".conv_shortcut.bias", 1, 0, 0)
-            : copy_image(input);
-        operators_.add(
-            hidden.buffer, hidden.buffer, residual.buffer,
-            static_cast<std::uint32_t>(elements(hidden)));
+        if (tensor_exists(vae_, prefix + ".conv_shortcut.weight")) {
+            GpuImage residual = conv(
+                vae_, std::move(input), prefix + ".conv_shortcut.weight",
+                prefix + ".conv_shortcut.bias", 1, 0, 0);
+            operators_.add(
+                hidden.buffer, hidden.buffer, residual.buffer,
+                static_cast<std::uint32_t>(elements(hidden)));
+        } else {
+            operators_.add(
+                hidden.buffer, hidden.buffer, input.buffer,
+                static_cast<std::uint32_t>(elements(hidden)));
+        }
         result = std::move(hidden);
         });
         return result;
@@ -464,9 +498,7 @@ private:
         hidden = vae_mid(std::move(hidden), "encoder.mid_block");
         group_norm(
             vae_, hidden, "encoder.conv_norm_out.weight",
-            "encoder.conv_norm_out.bias");
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            "encoder.conv_norm_out.bias", 1.0e-6f, true);
         hidden = conv(
             vae_, std::move(hidden), "encoder.conv_out.weight",
             "encoder.conv_out.bias");
@@ -503,9 +535,7 @@ private:
         }
         group_norm(
             vae_, hidden, "decoder.conv_norm_out.weight",
-            "decoder.conv_norm_out.bias");
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            "decoder.conv_norm_out.bias", 1.0e-6f, true);
         return conv(
             vae_, std::move(hidden), "decoder.conv_out.weight",
             "decoder.conv_out.bias");
@@ -551,44 +581,34 @@ private:
         GpuImage hidden = copy_image(input);
         group_norm(
             unet_, hidden, prefix + ".norm1.weight",
-            prefix + ".norm1.bias", 1.0e-5f);
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            prefix + ".norm1.bias", 1.0e-5f, true);
         hidden = conv(
             unet_, std::move(hidden), prefix + ".conv1.weight",
             prefix + ".conv1.bias");
-        GpuTokens activated{
-            context_.create_device_buffer(
-                std::uint64_t(time.tokens) * time.dimensions * sizeof(float)),
-            time.tokens, time.dimensions};
-        context_.copy(
-            activated.buffer, 0, time.buffer, 0,
-            std::uint64_t(time.tokens) * time.dimensions * sizeof(float));
-        operators_.silu(
-            activated.buffer, activated.tokens * activated.dimensions);
-        GpuTokens projected = linear(
-            unet_, std::move(activated), prefix + ".time_emb_proj.weight",
+        GpuTokens projected = linear_borrowed(
+            unet_, time, prefix + ".time_emb_proj.weight",
             prefix + ".time_emb_proj.bias");
         operators_.add_channel(
             hidden.buffer, projected.buffer, hidden.channels,
             hidden.width * hidden.height);
         group_norm(
             unet_, hidden, prefix + ".norm2.weight",
-            prefix + ".norm2.bias", 1.0e-5f);
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            prefix + ".norm2.bias", 1.0e-5f, true);
         hidden = conv(
             unet_, std::move(hidden), prefix + ".conv2.weight",
             prefix + ".conv2.bias");
-        GpuImage residual = tensor_exists(
-            unet_, prefix + ".conv_shortcut.weight")
-            ? conv(
-                unet_, copy_image(input), prefix + ".conv_shortcut.weight",
-                prefix + ".conv_shortcut.bias", 1, 0, 0)
-            : copy_image(input);
-        operators_.add(
-            hidden.buffer, hidden.buffer, residual.buffer,
-            static_cast<std::uint32_t>(elements(hidden)));
+        if (tensor_exists(unet_, prefix + ".conv_shortcut.weight")) {
+            GpuImage residual = conv(
+                unet_, std::move(input), prefix + ".conv_shortcut.weight",
+                prefix + ".conv_shortcut.bias", 1, 0, 0);
+            operators_.add(
+                hidden.buffer, hidden.buffer, residual.buffer,
+                static_cast<std::uint32_t>(elements(hidden)));
+        } else {
+            operators_.add(
+                hidden.buffer, hidden.buffer, input.buffer,
+                static_cast<std::uint32_t>(elements(hidden)));
+        }
         result = std::move(hidden);
         });
         return result;
@@ -664,6 +684,7 @@ private:
         GpuImage&& sample,
         std::uint32_t timestep) {
         GpuTokens time = time_embedding(timestep);
+        operators_.silu(time.buffer, time.tokens * time.dimensions);
         GpuImage hidden = conv(
             unet_, std::move(sample), "conv_in.weight", "conv_in.bias");
         std::vector<GpuImage> skips;
@@ -732,9 +753,7 @@ private:
         }
         group_norm(
             unet_, hidden, "conv_norm_out.weight",
-            "conv_norm_out.bias", 1.0e-5f);
-        operators_.silu(
-            hidden.buffer, static_cast<std::uint32_t>(elements(hidden)));
+            "conv_norm_out.bias", 1.0e-5f, true);
         return conv(
             unet_, std::move(hidden), "conv_out.weight", "conv_out.bias");
     }

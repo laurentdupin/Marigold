@@ -11,11 +11,6 @@
 namespace marigold_native {
 namespace {
 
-bool use_half_weight(std::string_view name) {
-    (void)name;
-    return false;
-}
-
 std::uint16_t float_to_half(float input) {
     std::uint32_t bits = 0;
     std::memcpy(&bits, &input, sizeof(bits));
@@ -145,6 +140,59 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
                 destination.winograd_buffer,
                 transformed.data(),
                 transformed.size() * sizeof(float));
+        }
+        if (context.subgroup_size() == 32 && source.rank == 2 &&
+            source.dimensions[1] % 4 == 0) {
+            const std::uint64_t outputs = source.dimensions[0];
+            const std::uint64_t inputs = source.dimensions[1];
+            std::vector<std::uint32_t> packed(
+                static_cast<std::size_t>((source.elements + 1) / 2), 0);
+            for (std::uint64_t output = 0; output < outputs; ++output) {
+                for (std::uint64_t input = 0; input < inputs; ++input) {
+                    const std::uint64_t packed_index =
+                        ((input / 4) * outputs + output) * 4 + input % 4;
+                    packed[static_cast<std::size_t>(packed_index / 2)] |=
+                        static_cast<std::uint32_t>(float_to_half(
+                            converted[static_cast<std::size_t>(
+                                output * inputs + input)])) <<
+                        ((packed_index & 1u) * 16u);
+                }
+            }
+            destination.half_buffer = context.create_device_buffer(
+                packed.size() * sizeof(std::uint32_t));
+            context.upload(
+                destination.half_buffer, packed.data(),
+                packed.size() * sizeof(std::uint32_t));
+            context.discard(destination.buffer);
+        } else if (context.subgroup_size() == 32 &&
+            source.rank == 4 && source.dimensions[2] == 3 &&
+            source.dimensions[3] == 3) {
+            const std::uint64_t output_channels = source.dimensions[0];
+            const std::uint64_t input_channels = source.dimensions[1];
+            std::vector<std::uint32_t> packed(
+                static_cast<std::size_t>((source.elements + 1) / 2), 0);
+            for (std::uint64_t output = 0;
+                 output < output_channels; ++output) {
+                for (std::uint64_t input = 0;
+                     input < input_channels; ++input) {
+                    for (std::uint64_t kernel = 0; kernel < 9; ++kernel) {
+                        const std::uint64_t source_index =
+                            (output * input_channels + input) * 9 + kernel;
+                        const std::uint64_t packed_index =
+                            (input * 9 + kernel) * output_channels + output;
+                        packed[static_cast<std::size_t>(packed_index / 2)] |=
+                            static_cast<std::uint32_t>(float_to_half(
+                                converted[static_cast<std::size_t>(
+                                    source_index)])) <<
+                            ((packed_index & 1u) * 16u);
+                    }
+                }
+            }
+            destination.half_buffer = context.create_device_buffer(
+                packed.size() * sizeof(std::uint32_t));
+            context.upload(
+                destination.half_buffer, packed.data(),
+                packed.size() * sizeof(std::uint32_t));
         }
         if (!tensors_.emplace(name, std::move(destination)).second) {
             throw std::runtime_error(
