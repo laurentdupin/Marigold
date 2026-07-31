@@ -419,6 +419,7 @@ private:
     std::atomic<std::uint64_t> tensor_download_bytes_{0};
     std::string device_name_;
     std::uint32_t subgroup_size_ = 0;
+    bool subgroup_size_forced_ = false;
 };
 
 }  // namespace marigold_native
