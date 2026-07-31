@@ -1,4 +1,3 @@
-
 #include "inferbridge_harness.h"
 
 #include "marigold_native.h"
@@ -70,24 +69,14 @@ struct ibrh_job {
     uintptr_t input_texture_handle = 0u;
     uintptr_t input_fence_handle = 0u;
     uint64_t input_fence_value = 0u;
+    uintptr_t output_texture_handle = 0u;
+    uintptr_t output_fence_handle = 0u;
+    uint64_t output_fence_value = 0u;
+    uint32_t output_width = 0u;
+    uint32_t output_height = 0u;
     uint64_t seed = 0u;
     bool rgba = false;
-    ~ibrh_job() {
-        gpu_job.reset();
-        gpu_admission.reset();
-        if (input_texture_handle)
-            CloseHandle(reinterpret_cast<HANDLE>(input_texture_handle));
-        if (input_fence_handle)
-            CloseHandle(reinterpret_cast<HANDLE>(input_fence_handle));
-    }
-#endif
-};
-
-struct ibrh_output_lease {
-    ibrh_job* job = nullptr;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-    std::shared_ptr<marigold_native::ExternalJob> gpu_job;
-    std::shared_ptr<MarigoldGpuAdmission> gpu_admission;
+    ~ibrh_job() { gpu_job.reset(); gpu_admission.reset(); }
 #endif
 };
 
@@ -103,7 +92,6 @@ ibrh_result fail(
     if (runtime != nullptr) runtime->error = message;
     return result;
 }
-
 std::string copy_string(ibrh_string_view value) {
     return value.size == 0u ? std::string() :
         std::string(value.data, value.size);
@@ -226,15 +214,6 @@ void release_job(ibrh_job* job) {
 }  // namespace
 
 #if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-void close_gpu_input_handles(ibrh_job& job) noexcept {
-    const auto texture = reinterpret_cast<HANDLE>(
-        std::exchange(job.input_texture_handle, 0u));
-    const auto fence = reinterpret_cast<HANDLE>(
-        std::exchange(job.input_fence_handle, 0u));
-    if (texture) CloseHandle(texture);
-    if (fence) CloseHandle(fence);
-}
-
 struct MarigoldGpuAdmission {
     explicit MarigoldGpuAdmission(std::shared_ptr<std::atomic<uint32_t>> value)
         : count(std::move(value)) {}
@@ -271,7 +250,6 @@ public:
         }
         if (removed) {
             job->gpu_state.store(IBRH_JOB_CANCELLED);
-            close_gpu_input_handles(*job);
             release_job(job);
         }
         return removed;
@@ -302,7 +280,6 @@ private:
             }
             if (stopping || job->cancel_requested.load()) {
                 job->gpu_state.store(IBRH_JOB_CANCELLED);
-                close_gpu_input_handles(*job);
                 release_job(job);
                 continue;
             }
@@ -310,9 +287,11 @@ private:
                 auto native = gpu_->submit_texture({
                     job->input_texture_handle, job->width, job->height,
                     job->rgba, job->input_fence_handle,
-                    job->input_fence_value, job->seed,
+                    job->input_fence_value, job->output_texture_handle,
+                    job->output_width, job->output_height,
+                    job->output_fence_handle, job->output_fence_value,
+                    job->seed,
                     job->source_frame_id, job->timestamp_ns});
-                close_gpu_input_handles(*job);
                 if (job->cancel_requested.load()) native->cancel();
                 {
                     std::lock_guard<std::mutex> lock(job->gpu_mutex);
@@ -321,7 +300,6 @@ private:
                 job->gpu_state.store(job->cancel_requested.load() ?
                     IBRH_JOB_CANCELLED : IBRH_JOB_RUNNING);
             } catch (const std::exception& error) {
-                close_gpu_input_handles(*job);
                 {
                     std::lock_guard<std::mutex> lock(job->gpu_mutex);
                     job->gpu_error = error.what();
@@ -503,105 +481,159 @@ void IBRH_CALL model_unload(ibrh_model* model) {
     delete model;
 }
 
+ibrh_result IBRH_CALL model_describe_io(
+    const ibrh_model* model, size_t descriptor_size,
+    ibrh_model_io_descriptor* descriptor) {
+    if (!model || !descriptor) return IBRH_ERROR_INVALID_ARGUMENT;
+    if (descriptor_size < sizeof(*descriptor)) return IBRH_ERROR_STRUCT_TOO_SMALL;
+    *descriptor = {};
+    descriptor->struct_size = sizeof(*descriptor);
+    descriptor->api_version = IBRH_CURRENT_API_VERSION;
+    descriptor->input_count = 1u;
+    descriptor->output_count = 1u;
+    return IBRH_OK;
+}
+
+ibrh_result IBRH_CALL model_get_port(
+    const ibrh_model* model, uint32_t direction, uint32_t index,
+    size_t descriptor_size, ibrh_port_descriptor* descriptor) {
+    if (!model || !descriptor) return IBRH_ERROR_INVALID_ARGUMENT;
+    if (descriptor_size < sizeof(*descriptor)) return IBRH_ERROR_STRUCT_TOO_SMALL;
+    if (index != 0u || (direction != IBRH_PORT_INPUT && direction != IBRH_PORT_OUTPUT))
+        return IBRH_ERROR_NOT_FOUND;
+    *descriptor = {};
+    descriptor->struct_size = sizeof(*descriptor);
+    descriptor->api_version = IBRH_CURRENT_API_VERSION;
+    descriptor->index = 0u;
+    descriptor->direction = direction;
+    descriptor->semantic = direction == IBRH_PORT_INPUT ? IBRH_SEMANTIC_IMAGE : IBRH_SEMANTIC_DEPTH;
+    descriptor->payload_type = direction == IBRH_PORT_INPUT ? IBRH_PIXEL_BGRA8 : IBRH_PIXEL_DEPTH_FLOAT32;
+    descriptor->pixel_format = descriptor->payload_type;
+    descriptor->resource_kind = IBRH_RESOURCE_KIND_IMAGE_2D;
+    descriptor->depth = 1u;
+    descriptor->flags = IBRH_DESCRIPTOR_DYNAMIC_WIDTH | IBRH_DESCRIPTOR_DYNAMIC_HEIGHT;
+    return IBRH_OK;
+}
+
+ibrh_result IBRH_CALL model_plan_outputs(
+    const ibrh_model* model, size_t request_size,
+    const ibrh_output_plan_request* request, uint32_t output_capacity,
+    ibrh_port_descriptor* outputs) {
+    if (!model || !request || !outputs) return IBRH_ERROR_INVALID_ARGUMENT;
+    if (request_size < sizeof(*request) || request->struct_size < sizeof(*request))
+        return IBRH_ERROR_STRUCT_TOO_SMALL;
+    if (output_capacity < 1u) return IBRH_ERROR_STRUCT_TOO_SMALL;
+    if (request->input_count != 1u || !request->inputs ||
+        request->inputs[0].width == 0u || request->inputs[0].height == 0u)
+        return IBRH_ERROR_INVALID_ARGUMENT;
+    const ibrh_result result = model_get_port(
+        model, IBRH_PORT_OUTPUT, 0u, sizeof(outputs[0]), &outputs[0]);
+    if (result != IBRH_OK) return result;
+    const int shape = marigold_inferbridge_image_shape(
+        request->inputs[0].width, request->inputs[0].height,
+        &outputs[0].width, &outputs[0].height);
+    if (shape != MARIGOLD_OK) return status_result(shape);
+    outputs[0].flags = 0u;
+    return IBRH_OK;
+}
+
 ibrh_result IBRH_CALL submit(
     ibrh_model* model, size_t request_size,
     const ibrh_submit_request* request, ibrh_job** output) {
-    if (model == nullptr || request == nullptr || output == nullptr)
-        return IBRH_ERROR_INVALID_ARGUMENT;
+    if (!model || !request || !output) return IBRH_ERROR_INVALID_ARGUMENT;
     *output = nullptr;
-    if (request_size < sizeof(*request) ||
-        request->struct_size < sizeof(*request))
+    if (request_size < sizeof(*request) || request->struct_size < sizeof(*request))
         return IBRH_ERROR_STRUCT_TOO_SMALL;
-    if (request->input_count != 1u || request->inputs == nullptr)
-        return fail(
-            model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-            "Marigold requires exactly one BGRA8 input");
-    const ibrh_resource& input = request->inputs[0];
-    if (input.struct_size < sizeof(input))
+    if (request->input_count != 1u || !request->inputs ||
+        request->output_count != 1u || !request->outputs)
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "Marigold requires one input and one Core-owned output");
+
+    const ibrh_transfer_binding& input_binding = request->inputs[0];
+    const ibrh_transfer_binding& output_binding = request->outputs[0];
+    if (input_binding.struct_size < sizeof(input_binding) ||
+        output_binding.struct_size < sizeof(output_binding) ||
+        input_binding.resource.struct_size < sizeof(input_binding.resource) ||
+        output_binding.resource.struct_size < sizeof(output_binding.resource) ||
+        input_binding.synchronization.struct_size < sizeof(input_binding.synchronization) ||
+        output_binding.synchronization.struct_size < sizeof(output_binding.synchronization))
         return IBRH_ERROR_STRUCT_TOO_SMALL;
-    uint64_t seed =
-        request->source_frame_id != 0u ? request->source_frame_id :
-        request->timestamp_ns != 0u ? request->timestamp_ns :
+    const ibrh_resource& input = input_binding.resource;
+    const ibrh_resource& destination = output_binding.resource;
+    uint32_t planned_width = 0u;
+    uint32_t planned_height = 0u;
+    if (marigold_inferbridge_image_shape(
+            input.width, input.height, &planned_width, &planned_height) != MARIGOLD_OK)
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT, marigold_last_error());
+    if (destination.width != planned_width || destination.height != planned_height ||
+        destination.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
+        destination.pixel_format != IBRH_PIXEL_DEPTH_FLOAT32)
+        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "Marigold Core-owned output does not match the output plan");
+
+    uint64_t seed = request->source_frame_id ? request->source_frame_id :
+        request->timestamp_ns ? request->timestamp_ns :
         model->next_seed.fetch_add(1u);
-    const std::string submit_parameters = copy_string(request->parameters_json);
-    if (submit_parameters.find("\"Seed\"") != std::string::npos &&
-        !json_uint64(submit_parameters, "Seed", seed))
+    const std::string parameters = copy_string(request->parameters_json);
+    if (parameters.find("\"Seed\"") != std::string::npos &&
+        !json_uint64(parameters, "Seed", seed))
         return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
                     "Marigold Seed must be an unsigned integer");
+
 #if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-    if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12 &&
-        input.kind == IBRH_RESOURCE_KIND_IMAGE_2D &&
-        input.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED) {
+    if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12) {
+        const ibrh_synchronization& wait = input_binding.synchronization;
+        const ibrh_synchronization& signal = output_binding.synchronization;
         if (!model->gpu_worker)
             return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
                         "Marigold GPU model was not loaded for external input");
-        if (input.pixel_format != IBRH_PIXEL_BGRA8 ||
-            !input.native_handle || !input.width || !input.height)
+        if (input.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
+            (input.pixel_format != IBRH_PIXEL_BGRA8 &&
+             input.pixel_format != IBRH_PIXEL_RGBA8) ||
+            input.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            !input.native_handle || !input.width || !input.height ||
+            destination.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
+            destination.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            !destination.native_handle ||
+            wait.kind != IBRH_SYNC_D3D12_FENCE ||
+            wait.operation != IBRH_SYNC_WAIT ||
+            wait.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            !wait.native_handle ||
+            signal.kind != IBRH_SYNC_D3D12_FENCE ||
+            signal.operation != IBRH_SYNC_SIGNAL ||
+            signal.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            !signal.native_handle)
             return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Marigold external texture descriptor is invalid");
-        const ibrh_synchronization* wait = nullptr;
-        for (uint32_t i = 0u; i < request->synchronization_count; ++i) {
-            const auto& candidate = request->synchronizations[i];
-            if (candidate.struct_size < sizeof(candidate))
-                return IBRH_ERROR_STRUCT_TOO_SMALL;
-            if (candidate.kind == IBRH_SYNC_D3D12_FENCE &&
-                candidate.operation == IBRH_SYNC_WAIT &&
-                candidate.native_handle_type == IBRH_NATIVE_HANDLE_WIN32_SHARED) {
-                if (wait) return IBRH_ERROR_INVALID_ARGUMENT;
-                wait = &candidate;
-            }
-        }
-        if (!wait || !wait->native_handle)
-            return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                        "Marigold external input requires one D3D12 wait fence");
-        HANDLE texture_copy = nullptr;
-        HANDLE fence_copy = nullptr;
-        const HANDLE process = GetCurrentProcess();
-        if (!DuplicateHandle(process, reinterpret_cast<HANDLE>(input.native_handle),
-                             process, &texture_copy, 0, FALSE,
-                             DUPLICATE_SAME_ACCESS) ||
-            !DuplicateHandle(process, reinterpret_cast<HANDLE>(wait->native_handle),
-                             process, &fence_copy, 0, FALSE,
-                             DUPLICATE_SAME_ACCESS)) {
-            if (texture_copy) CloseHandle(texture_copy);
-            if (fence_copy) CloseHandle(fence_copy);
-            return IBRH_ERROR_INVALID_ARGUMENT;
-        }
+                        "Marigold external transfer bindings are invalid");
+
         uint32_t admitted = model->gpu_admissions->load();
-        while (admitted < 3u &&
-               !model->gpu_admissions->compare_exchange_weak(
+        while (admitted < 3u && !model->gpu_admissions->compare_exchange_weak(
                    admitted, admitted + 1u)) {}
-        if (admitted >= 3u) {
-            CloseHandle(texture_copy);
-            CloseHandle(fence_copy);
-            return IBRH_ERROR_INVALID_STATE;
-        }
+        if (admitted >= 3u) return IBRH_ERROR_INVALID_STATE;
         auto* job = new (std::nothrow) ibrh_job();
-        if (!job) {
-            model->gpu_admissions->fetch_sub(1u);
-            CloseHandle(texture_copy);
-            CloseHandle(fence_copy);
-            return IBRH_ERROR_INTERNAL;
-        }
+        if (!job) { model->gpu_admissions->fetch_sub(1u); return IBRH_ERROR_INTERNAL; }
         try {
             job->gpu_admission = std::make_shared<MarigoldGpuAdmission>(
                 model->gpu_admissions);
         } catch (...) {
             model->gpu_admissions->fetch_sub(1u);
             delete job;
-            CloseHandle(texture_copy);
-            CloseHandle(fence_copy);
             return IBRH_ERROR_INTERNAL;
         }
-        job->input_texture_handle = reinterpret_cast<uintptr_t>(texture_copy);
-        job->input_fence_handle = reinterpret_cast<uintptr_t>(fence_copy);
-        job->input_fence_value = wait->value;
+        job->input_texture_handle = static_cast<uintptr_t>(input.native_handle);
+        job->input_fence_handle = static_cast<uintptr_t>(wait.native_handle);
+        job->input_fence_value = wait.value;
+        job->output_texture_handle = static_cast<uintptr_t>(destination.native_handle);
+        job->output_fence_handle = static_cast<uintptr_t>(signal.native_handle);
+        job->output_fence_value = signal.value;
+        job->output_width = planned_width;
+        job->output_height = planned_height;
         job->source_frame_id = request->source_frame_id;
         job->timestamp_ns = request->timestamp_ns;
         job->width = input.width;
         job->height = input.height;
         job->seed = seed;
-        job->rgba = false;
+        job->rgba = input.pixel_format == IBRH_PIXEL_RGBA8;
         job->gpu_state.store(IBRH_JOB_QUEUED);
         try {
             job->gpu_worker = model->gpu_worker;
@@ -614,52 +646,40 @@ ibrh_result IBRH_CALL submit(
         return IBRH_OK;
     }
 #endif
-    if (request->synchronization_count != 0u)
-        return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-                    "Marigold host harness does not accept external synchronization");
+
     if (input.domain != IBRH_RESOURCE_DOMAIN_HOST ||
         input.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
         input.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
-        input.pixel_format != IBRH_PIXEL_BGRA8 ||
-        input.native_handle == 0u || input.width == 0u ||
-        input.height == 0u || input.width > UINT32_MAX / 4u ||
+        input.pixel_format != IBRH_PIXEL_BGRA8 || !input.native_handle ||
         input.row_stride_bytes < input.width * 4u ||
         input.byte_offset > input.byte_size ||
         input.byte_size - input.byte_offset <
-            static_cast<uint64_t>(input.row_stride_bytes) * input.height) {
-        return fail(
-            model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
-            "Marigold harness requires a valid host BGRA8 image");
-    }
+            static_cast<uint64_t>(input.row_stride_bytes) * input.height ||
+        destination.domain != IBRH_RESOURCE_DOMAIN_HOST ||
+        destination.native_handle_type != IBRH_NATIVE_HANDLE_HOST_POINTER ||
+        !destination.native_handle ||
+        destination.byte_offset > destination.byte_size ||
+        destination.byte_size - destination.byte_offset <
+            static_cast<uint64_t>(planned_width) * planned_height * sizeof(float) ||
+        input_binding.synchronization.kind != IBRH_SYNC_NONE ||
+        output_binding.synchronization.kind != IBRH_SYNC_NONE)
+        return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
+                    "Marigold host transfer bindings are invalid");
     auto* job = new (std::nothrow) ibrh_job();
-    if (job == nullptr) return IBRH_ERROR_INTERNAL;
+    if (!job) return IBRH_ERROR_INTERNAL;
     job->source_frame_id = request->source_frame_id;
     job->timestamp_ns = request->timestamp_ns;
-    if (marigold_inferbridge_image_shape(
-            input.width, input.height, &job->width, &job->height) != MARIGOLD_OK) {
-        delete job;
-        return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
-                    marigold_last_error());
-    }
-    try {
-        job->depth.resize(
-            static_cast<size_t>(job->width) * job->height);
-    } catch (...) {
-        delete job;
-        return IBRH_ERROR_INTERNAL;
-    }
+    job->width = planned_width;
+    job->height = planned_height;
     const auto* bgra = reinterpret_cast<const uint8_t*>(
         static_cast<uintptr_t>(input.native_handle)) + input.byte_offset;
+    auto* depth = reinterpret_cast<float*>(
+        static_cast<uintptr_t>(destination.native_handle) + destination.byte_offset);
     {
         std::lock_guard<std::mutex> lock(model->submit_mutex);
         const int status = marigold_infer_bgra8_f32(
-            model->context,
-            bgra,
-            input.width,
-            input.height,
-            input.row_stride_bytes,
-            seed,
-            job->depth.data());
+            model->context, bgra, input.width, input.height,
+            input.row_stride_bytes, seed, depth);
         if (status != MARIGOLD_OK) {
             const std::string message =
                 std::string("Marigold inference failed: ") + marigold_last_error();
@@ -730,106 +750,6 @@ void IBRH_CALL job_release(ibrh_job* job) {
     release_job(job);
 }
 
-ibrh_result IBRH_CALL output_acquire(
-    ibrh_job* job, uint32_t output_index, size_t descriptor_size,
-    ibrh_output_descriptor* descriptor, ibrh_output_lease** output) {
-    if (job == nullptr || descriptor == nullptr || output == nullptr)
-        return IBRH_ERROR_INVALID_ARGUMENT;
-    *output = nullptr;
-    if (descriptor_size < sizeof(*descriptor))
-        return IBRH_ERROR_STRUCT_TOO_SMALL;
-    if (output_index != 0u) return IBRH_ERROR_NOT_FOUND;
-    auto* lease = new (std::nothrow) ibrh_output_lease();
-    if (lease == nullptr) return IBRH_ERROR_INTERNAL;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-    if (job->gpu_admission) {
-        std::shared_ptr<marigold_native::ExternalJob> gpu_job;
-        {
-            std::lock_guard<std::mutex> lock(job->gpu_mutex);
-            gpu_job = job->gpu_job;
-        }
-        if (!gpu_job) {
-            delete lease;
-            const uint32_t state = job->gpu_state.load();
-            if (state == IBRH_JOB_CANCELLED) return IBRH_ERROR_CANCELLED;
-            if (state == IBRH_JOB_FAILED) return IBRH_ERROR_INTERNAL;
-            return IBRH_ERROR_INVALID_STATE;
-        }
-        marigold_native::ExternalTextureOutput native{};
-        try { native = gpu_job->output(); }
-        catch (...) { delete lease; return IBRH_ERROR_CANCELLED; }
-        lease->gpu_job = std::move(gpu_job);
-        lease->gpu_admission = job->gpu_admission;
-        *descriptor = {};
-        descriptor->struct_size = sizeof(*descriptor);
-        descriptor->api_version = IBRH_CURRENT_API_VERSION;
-        descriptor->output_index = output_index;
-        descriptor->payload_type = IBRH_PIXEL_DEPTH_FLOAT32;
-        descriptor->source_frame_id = native.source_frame_id;
-        descriptor->timestamp_ns = native.timestamp_ns;
-        descriptor->resource.struct_size = sizeof(descriptor->resource);
-        descriptor->resource.api_version = IBRH_CURRENT_API_VERSION;
-        descriptor->resource.domain = IBRH_RESOURCE_DOMAIN_D3D12;
-        descriptor->resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
-        descriptor->resource.access = IBRH_RESOURCE_ACCESS_READ;
-        descriptor->resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
-        descriptor->resource.width = native.width;
-        descriptor->resource.height = native.height;
-        descriptor->resource.depth = 1u;
-        descriptor->resource.row_stride_bytes = native.width * sizeof(float);
-        descriptor->resource.byte_size =
-            static_cast<uint64_t>(native.width) * native.height * sizeof(float);
-        descriptor->resource.native_handle_type = IBRH_NATIVE_HANDLE_WIN32_SHARED;
-        descriptor->resource.native_handle = native.shared_texture_handle;
-        descriptor->ready.struct_size = sizeof(descriptor->ready);
-        descriptor->ready.api_version = IBRH_CURRENT_API_VERSION;
-        descriptor->ready.kind = IBRH_SYNC_D3D12_FENCE;
-        descriptor->ready.operation = IBRH_SYNC_WAIT;
-        descriptor->ready.native_handle_type = IBRH_NATIVE_HANDLE_WIN32_SHARED;
-        descriptor->ready.native_handle = native.ready_fence_handle;
-        descriptor->ready.value = native.ready_fence_value;
-        *output = lease;
-        return IBRH_OK;
-    }
-#endif
-    retain_job(job);
-    lease->job = job;
-    *descriptor = {};
-    descriptor->struct_size = sizeof(*descriptor);
-    descriptor->api_version = IBRH_CURRENT_API_VERSION;
-    descriptor->output_index = 0u;
-    descriptor->payload_type = IBRH_PIXEL_DEPTH_FLOAT32;
-    descriptor->source_frame_id = job->source_frame_id;
-    descriptor->timestamp_ns = job->timestamp_ns;
-    descriptor->resource.struct_size = sizeof(descriptor->resource);
-    descriptor->resource.api_version = IBRH_CURRENT_API_VERSION;
-    descriptor->resource.domain = IBRH_RESOURCE_DOMAIN_HOST;
-    descriptor->resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
-    descriptor->resource.access = IBRH_RESOURCE_ACCESS_READ;
-    descriptor->resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
-    descriptor->resource.width = job->width;
-    descriptor->resource.height = job->height;
-    descriptor->resource.depth = 1u;
-    descriptor->resource.row_stride_bytes = job->width * sizeof(float);
-    descriptor->resource.byte_size = job->depth.size() * sizeof(float);
-    descriptor->resource.native_handle_type =
-        IBRH_NATIVE_HANDLE_HOST_POINTER;
-    descriptor->resource.native_handle = static_cast<uint64_t>(
-        reinterpret_cast<uintptr_t>(job->depth.data()));
-    *output = lease;
-    return IBRH_OK;
-}
-
-void IBRH_CALL output_release(ibrh_output_lease* lease) {
-    if (lease == nullptr) return;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-    lease->gpu_job.reset();
-    lease->gpu_admission.reset();
-#endif
-    release_job(lease->job);
-    delete lease;
-}
-
 ibrh_result IBRH_CALL get_last_error(
     const void* object, char* destination, size_t destination_size,
     size_t* required_size) {
@@ -861,12 +781,13 @@ extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     api->runtime_destroy = runtime_destroy;
     api->model_load = model_load;
     api->model_unload = model_unload;
+    api->model_describe_io = model_describe_io;
+    api->model_get_port = model_get_port;
+    api->model_plan_outputs = model_plan_outputs;
     api->submit = submit;
     api->job_poll = job_poll;
     api->job_cancel = job_cancel;
     api->job_release = job_release;
-    api->output_acquire = output_acquire;
-    api->output_release = output_release;
     api->get_last_error = get_last_error;
     return IBRH_OK;
 }

@@ -20,17 +20,12 @@ struct ExternalTextureRequest {
     bool rgba = false;
     std::uintptr_t wait_fence_handle = 0u;
     std::uint64_t wait_fence_value = 0u;
+    std::uintptr_t output_texture_handle = 0u;
+    std::uint32_t output_width = 0u;
+    std::uint32_t output_height = 0u;
+    std::uintptr_t signal_fence_handle = 0u;
+    std::uint64_t signal_fence_value = 0u;
     std::uint64_t seed = 0u;
-    std::uint64_t source_frame_id = 0u;
-    std::uint64_t timestamp_ns = 0u;
-};
-
-struct ExternalTextureOutput {
-    std::uintptr_t shared_texture_handle = 0u;
-    std::uint32_t width = 0u;
-    std::uint32_t height = 0u;
-    std::uintptr_t ready_fence_handle = 0u;
-    std::uint64_t ready_fence_value = 0u;
     std::uint64_t source_frame_id = 0u;
     std::uint64_t timestamp_ns = 0u;
 };
@@ -42,7 +37,6 @@ public:
     virtual ~ExternalJob() = default;
     virtual ExternalJobState state() const = 0;
     virtual void cancel() = 0;
-    virtual ExternalTextureOutput output() const = 0;
 };
 
 class ExternalGpu : public std::enable_shared_from_this<ExternalGpu> {
@@ -64,4 +58,3 @@ std::shared_ptr<ExternalGpu> create_external_gpu(
 ExternalGpuCapabilities probe_external_gpu(std::uint32_t device_index);
 
 }  // namespace marigold_native
-

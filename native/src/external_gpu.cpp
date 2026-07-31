@@ -1,4 +1,3 @@
-
 #include "external_gpu.h"
 
 #include "gpu_model.h"
@@ -46,7 +45,7 @@ void inferbridge_shape(
 
 #if defined(_WIN32)
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kGpuSlotCount = 3u;
+constexpr std::uint32_t kMaxInFlightJobs = 3u;
 
 void check_hresult(HRESULT result, const char* operation) {
     if (FAILED(result))
@@ -78,69 +77,6 @@ ComPtr<ID3D12Device> matching_d3d12_device(std::uint64_t luid) {
     return {};
 }
 
-struct SharedOutput {
-    ComPtr<ID3D12Resource> resource;
-    ComPtr<ID3D12Fence> fence;
-    HANDLE resource_handle = nullptr;
-    HANDLE fence_handle = nullptr;
-    ~SharedOutput() {
-        if (resource_handle) CloseHandle(resource_handle);
-        if (fence_handle) CloseHandle(fence_handle);
-    }
-    SharedOutput() = default;
-    SharedOutput(const SharedOutput&) = delete;
-    SharedOutput& operator=(const SharedOutput&) = delete;
-    SharedOutput(SharedOutput&& other) noexcept
-        : resource(std::move(other.resource)), fence(std::move(other.fence)),
-          resource_handle(std::exchange(other.resource_handle, nullptr)),
-          fence_handle(std::exchange(other.fence_handle, nullptr)) {}
-    SharedOutput& operator=(SharedOutput&& other) noexcept {
-        if (this != &other) {
-            if (resource_handle) CloseHandle(resource_handle);
-            if (fence_handle) CloseHandle(fence_handle);
-            resource = std::move(other.resource);
-            fence = std::move(other.fence);
-            resource_handle = std::exchange(other.resource_handle, nullptr);
-            fence_handle = std::exchange(other.fence_handle, nullptr);
-        }
-        return *this;
-    }
-};
-
-struct GpuSlot {
-    std::atomic<bool> occupied{false};
-    SharedOutput shared;
-    std::uint32_t width = 0u;
-    std::uint32_t height = 0u;
-    std::uint64_t fence_value = 0u;
-};
-
-SharedOutput create_shared_output(
-    ID3D12Device* device, std::uint32_t width, std::uint32_t height) {
-    const D3D12_HEAP_PROPERTIES heap{
-        D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
-        D3D12_MEMORY_POOL_UNKNOWN, 1, 1};
-    const D3D12_RESOURCE_DESC description{
-        D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, width, height, 1, 1,
-        DXGI_FORMAT_R32_FLOAT, {1, 0}, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
-    SharedOutput output;
-    check_hresult(device->CreateCommittedResource(
-        &heap, D3D12_HEAP_FLAG_SHARED, &description,
-        D3D12_RESOURCE_STATE_COMMON, nullptr,
-        IID_PPV_ARGS(&output.resource)), "CreateCommittedResource(Marigold output)");
-    check_hresult(device->CreateFence(
-        0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&output.fence)),
-        "CreateFence(Marigold output)");
-    check_hresult(device->CreateSharedHandle(
-        output.resource.Get(), nullptr, GENERIC_ALL, nullptr,
-        &output.resource_handle), "CreateSharedHandle(Marigold output)");
-    check_hresult(device->CreateSharedHandle(
-        output.fence.Get(), nullptr, GENERIC_ALL, nullptr,
-        &output.fence_handle), "CreateSharedHandle(Marigold fence)");
-    return output;
-}
-
 void validate_input(
     ID3D12Device* device, const ExternalTextureRequest& request) {
     ComPtr<ID3D12Resource> resource;
@@ -158,51 +94,34 @@ void validate_input(
         throw std::invalid_argument("shared Marigold input texture is invalid");
 }
 
-std::shared_ptr<GpuSlot> acquire_slot(
-    const std::array<std::shared_ptr<GpuSlot>, kGpuSlotCount>& slots,
-    std::atomic<std::uint32_t>& next) {
-    const std::uint32_t first = next.fetch_add(1u) % kGpuSlotCount;
-    for (std::uint32_t offset = 0u; offset < kGpuSlotCount; ++offset) {
-        const auto& slot = slots[(first + offset) % kGpuSlotCount];
-        bool expected = false;
-        if (slot->occupied.compare_exchange_strong(expected, true)) return slot;
-    }
-    throw std::runtime_error("all Marigold GPU output slots are occupied");
-}
-
-VulkanImage prepare_output(
-    GpuSlot& slot, ID3D12Device* device, VulkanContext& context,
-    std::uint32_t width, std::uint32_t height) {
-    if (!slot.shared.resource || slot.width != width || slot.height != height) {
-        slot.shared = SharedOutput{};
-        slot.shared = create_shared_output(device, width, height);
-        slot.width = width;
-        slot.height = height;
-        slot.fence_value = 0u;
-    }
-    return context.import_d3d12_image(
-        slot.shared.resource_handle, width, height, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+void validate_output(
+    ID3D12Device* device, const ExternalTextureRequest& request) {
+    ComPtr<ID3D12Resource> resource;
+    check_hresult(device->OpenSharedHandle(
+        reinterpret_cast<HANDLE>(request.output_texture_handle),
+        IID_PPV_ARGS(&resource)), "OpenSharedHandle(Marigold output)");
+    const D3D12_RESOURCE_DESC description = resource->GetDesc();
+    if (description.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        description.Width != request.output_width ||
+        description.Height != request.output_height ||
+        description.DepthOrArraySize != 1u || description.MipLevels != 1u ||
+        description.SampleDesc.Count != 1u ||
+        description.Format != DXGI_FORMAT_R32_FLOAT)
+        throw std::invalid_argument("shared Marigold output texture is invalid");
 }
 
 class ExternalJobImpl final : public ExternalJob {
 public:
     ExternalJobImpl(
-        std::shared_ptr<ExternalGpu> owner, std::shared_ptr<GpuSlot> slot,
-        VulkanImage input, VulkanImage output, VulkanSubmission submission,
-        ExternalTextureRequest request, std::uint32_t output_width,
-        std::uint32_t output_height, std::uint64_t fence_value)
-        : owner_(std::move(owner)), slot_(std::move(slot)),
-          input_(std::move(input)), output_(std::move(output)),
-          submission_(std::move(submission)), request_(request),
-          output_width_(output_width), output_height_(output_height),
-          fence_value_(fence_value) {}
+        std::shared_ptr<ExternalGpu> owner, VulkanImage input,
+        VulkanImage output, VulkanSubmission submission)
+        : owner_(std::move(owner)), input_(std::move(input)),
+          output_(std::move(output)), submission_(std::move(submission)) {}
     ~ExternalJobImpl() override {
         try { submission_.wait(); } catch (...) {}
         submission_ = {};
         output_ = {};
         input_ = {};
-        slot_->occupied.store(false);
     }
     ExternalJobState state() const override {
         if (cancelled_.load()) return ExternalJobState::cancelled;
@@ -212,24 +131,11 @@ public:
         return ExternalJobState::complete;
     }
     void cancel() override { cancelled_.store(true); }
-    ExternalTextureOutput output() const override {
-        if (cancelled_.load()) throw std::runtime_error("Marigold job cancelled");
-        return {
-            reinterpret_cast<std::uintptr_t>(slot_->shared.resource_handle),
-            output_width_, output_height_,
-            reinterpret_cast<std::uintptr_t>(slot_->shared.fence_handle),
-            fence_value_, request_.source_frame_id, request_.timestamp_ns};
-    }
 private:
     std::shared_ptr<ExternalGpu> owner_;
-    std::shared_ptr<GpuSlot> slot_;
     VulkanImage input_;
     VulkanImage output_;
     mutable VulkanSubmission submission_;
-    ExternalTextureRequest request_{};
-    std::uint32_t output_width_ = 0u;
-    std::uint32_t output_height_ = 0u;
-    std::uint64_t fence_value_ = 0u;
     std::atomic<bool> cancelled_{false};
     mutable std::atomic<bool> complete_{false};
 };
@@ -248,9 +154,7 @@ public:
                   model_.unet().tensor("conv_in.weight").dimensions[1]))),
           graph_(context_, unet_, vae_, operators_, prompt_, full_v1)
 #if defined(_WIN32)
-          , d3d12_(matching_d3d12_device(context_.adapter_luid())),
-          slots_{std::make_shared<GpuSlot>(), std::make_shared<GpuSlot>(),
-                 std::make_shared<GpuSlot>()}
+          , d3d12_(matching_d3d12_device(context_.adapter_luid()))
 #endif
           {}
 
@@ -263,7 +167,7 @@ public:
             value.d3d12_rgba8_sampled_image_import &&
             value.d3d12_r32_storage_image_import;
         return {available, available ? context_.adapter_luid() : 0u,
-                available ? kGpuSlotCount : 0u};
+                available ? kMaxInFlightJobs : 0u};
 #else
         return {};
 #endif
@@ -278,19 +182,26 @@ public:
         if (!capabilities().available)
             throw std::runtime_error("Marigold external GPU path is unavailable");
         if (!request.shared_texture_handle || !request.wait_fence_handle ||
-            !request.width || !request.height)
+            !request.output_texture_handle || !request.signal_fence_handle ||
+            !request.width || !request.height ||
+            !request.output_width || !request.output_height)
             throw std::invalid_argument("invalid Marigold external GPU request");
         validate_input(d3d12_.Get(), request);
-        auto slot = acquire_slot(slots_, next_slot_);
+        validate_output(d3d12_.Get(), request);
         try {
             std::lock_guard<std::mutex> lock(record_mutex_);
             std::uint32_t processing_width = 0u;
             std::uint32_t processing_height = 0u;
             inferbridge_shape(request.width, request.height,
                               processing_width, processing_height);
-            VulkanImage output = prepare_output(
-                *slot, d3d12_.Get(), context_, processing_width,
-                processing_height);
+            if (request.output_width != processing_width ||
+                request.output_height != processing_height)
+                throw std::invalid_argument("Marigold output dimensions do not match its plan");
+            VulkanImage output = context_.import_d3d12_image(
+                reinterpret_cast<void*>(request.output_texture_handle),
+                request.output_width, request.output_height,
+                VK_FORMAT_R32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
             VulkanImage input = context_.import_d3d12_image(
                 reinterpret_cast<void*>(request.shared_texture_handle),
                 request.width, request.height,
@@ -298,12 +209,12 @@ public:
                                VK_FORMAT_B8G8R8A8_UNORM,
                 VK_IMAGE_USAGE_SAMPLED_BIT |
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-            const std::uint64_t signal_value = ++slot->fence_value;
             VulkanSemaphore wait = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(request.wait_fence_handle),
                 request.wait_fence_value);
             VulkanSemaphore signal = context_.import_d3d12_fence(
-                slot->shared.fence_handle, signal_value);
+                reinterpret_cast<void*>(request.signal_fence_handle),
+                request.signal_fence_value);
             VulkanSubmission submission = context_.batch_async(
                 std::move(wait), std::move(signal), [&] {
                     context_.acquire_external_image(
@@ -339,11 +250,9 @@ public:
                         VK_ACCESS_SHADER_WRITE_BIT);
                 });
             return std::make_shared<ExternalJobImpl>(
-                shared_from_this(), slot, std::move(input), std::move(output),
-                std::move(submission), request, processing_width,
-                processing_height, signal_value);
+                shared_from_this(), std::move(input), std::move(output),
+                std::move(submission));
         } catch (...) {
-            slot->occupied.store(false);
             throw;
         }
 #endif
@@ -365,8 +274,6 @@ private:
     MarigoldGpuGraph graph_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
-    std::array<std::shared_ptr<GpuSlot>, kGpuSlotCount> slots_;
-    std::atomic<std::uint32_t> next_slot_{0u};
     std::mutex record_mutex_;
 #endif
 };
@@ -392,7 +299,7 @@ ExternalGpuCapabilities probe_external_gpu(std::uint32_t device_index) {
         value.d3d12_rgba8_sampled_image_import &&
         value.d3d12_r32_storage_image_import;
     return {available, available ? context.adapter_luid() : 0u,
-            available ? kGpuSlotCount : 0u};
+            available ? kMaxInFlightJobs : 0u};
 #else
     (void)device_index;
     return {};
@@ -400,4 +307,3 @@ ExternalGpuCapabilities probe_external_gpu(std::uint32_t device_index) {
 }
 
 }  // namespace marigold_native
-
