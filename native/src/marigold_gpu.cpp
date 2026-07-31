@@ -107,14 +107,30 @@ public:
                 std::uint64_t(width) * height * 3 * sizeof(float)),
             3, height, width};
         operators_.preprocess_rgb(image.buffer, host_rgb, width, height);
+        VulkanBuffer target = context_.create_device_buffer(
+            std::uint64_t(latent_count) * sizeof(float));
+        context_.upload(
+            target, target_noise, latent_count * sizeof(float));
+        return run_device(
+            std::move(image.buffer), width, height, std::move(target),
+            full_v1);
+    }
+
+    GpuImage run_device(
+        VulkanBuffer rgb, std::uint32_t width, std::uint32_t height,
+        VulkanBuffer target_buffer, bool full_v1) {
+        winograd_selected_ = true;
+        winograd_enabled_ = false;
+        const std::uint32_t latent_width = width / 8;
+        const std::uint32_t latent_height = height / 8;
+        const std::uint32_t latent_count =
+            4 * latent_width * latent_height;
+        GpuImage image{std::move(rgb), 3, height, width};
         GpuImage posterior = vae_encode(std::move(image));
         operators_.scale_values(
             posterior.buffer, latent_count, 0.18215f);
         GpuImage target{
-            context_.create_device_buffer(latent_count * sizeof(float)),
-            4, latent_height, latent_width};
-        context_.upload(
-            target.buffer, target_noise, latent_count * sizeof(float));
+            std::move(target_buffer), 4, latent_height, latent_width};
         if (!full_v1) {
             GpuImage sample{
                 context_.create_device_buffer(
@@ -767,6 +783,41 @@ private:
     VulkanBuffer zero_bias_;
     GpuTokens prompt_;
 };
+}
+
+struct MarigoldGpuGraph::Impl {
+    Impl(
+        VulkanContext& context_value, GpuModel& unet, GpuModel& vae,
+        VulkanOperators& operators_value, const TokenTensor& prompt,
+        bool full_v1_value)
+        : context(context_value), operators(operators_value),
+          full_v1(full_v1_value),
+          graph(context_value, unet, vae, operators_value, prompt) {}
+    VulkanContext& context;
+    VulkanOperators& operators;
+    bool full_v1;
+    Graph graph;
+};
+
+MarigoldGpuGraph::MarigoldGpuGraph(
+    VulkanContext& context, GpuModel& unet, GpuModel& vae,
+    VulkanOperators& operators, const TokenTensor& prompt, bool full_v1)
+    : impl_(std::make_unique<Impl>(
+          context, unet, vae, operators, prompt, full_v1)) {}
+
+MarigoldGpuGraph::~MarigoldGpuGraph() = default;
+
+VulkanBuffer MarigoldGpuGraph::infer_device(
+    VulkanBuffer rgb, std::uint32_t width, std::uint32_t height,
+    VulkanBuffer target_noise) {
+    GpuImage decoded = impl_->graph.run_device(
+        std::move(rgb), width, height, std::move(target_noise),
+        impl_->full_v1);
+    VulkanBuffer depth = impl_->context.create_device_buffer(
+        std::uint64_t(width) * height * sizeof(float));
+    impl_->operators.depth_output(
+        depth, decoded.buffer, decoded.width, decoded.height, width, height);
+    return depth;
 }
 
 VulkanBuffer marigold_infer_gpu(

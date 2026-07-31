@@ -47,9 +47,14 @@
 #include "attention_scores_spv.h"
 #include "attention_values_spv.h"
 #include "preprocess_rgb_spv.h"
+#include "preprocess_texture_spv.h"
+#include "seeded_noise_spv.h"
 #include "posterior_sample_spv.h"
 #include "scale_values_spv.h"
 #include "depth_output_spv.h"
+#include "depth_minimum_spv.h"
+#include "normalize_depth_spv.h"
+#include "depth_to_image_spv.h"
 #include "scheduler_target_spv.h"
 #include "ddim_step_spv.h"
 
@@ -266,6 +271,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_attention_values_spv_size, 3, 16)),
       preprocess_rgb_(context.create_pipeline(
           marigold_preprocess_rgb_spv, marigold_preprocess_rgb_spv_size, 2, 8)),
+      preprocess_texture_(context.create_pipeline(
+          marigold_preprocess_texture_spv,
+          marigold_preprocess_texture_spv_size,
+          {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+           VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 16)),
+      seeded_noise_(context.create_pipeline(
+          marigold_seeded_noise_spv, marigold_seeded_noise_spv_size, 1, 12)),
       posterior_sample_(context.create_pipeline(
           marigold_posterior_sample_spv,
           marigold_posterior_sample_spv_size, 3, 4)),
@@ -273,6 +285,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_scale_values_spv, marigold_scale_values_spv_size, 1, 8)),
       depth_output_(context.create_pipeline(
           marigold_depth_output_spv, marigold_depth_output_spv_size, 2, 16)),
+      depth_minimum_(context.create_pipeline(
+          marigold_depth_minimum_spv, marigold_depth_minimum_spv_size, 2, 4)),
+      normalize_depth_(context.create_pipeline(
+          marigold_normalize_depth_spv, marigold_normalize_depth_spv_size, 2, 4)),
+      depth_to_image_(context.create_pipeline(
+          marigold_depth_to_image_spv, marigold_depth_to_image_spv_size,
+          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, 8)),
       scheduler_target_(context.create_pipeline(
           marigold_scheduler_target_spv,
           marigold_scheduler_target_spv_size, 2, 4)),
@@ -335,9 +355,14 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     attention_scores_.set_debug_name("attention_scores");
     attention_values_.set_debug_name("attention_values");
     preprocess_rgb_.set_debug_name("preprocess_rgb");
+    preprocess_texture_.set_debug_name("preprocess_texture");
+    seeded_noise_.set_debug_name("seeded_noise");
     posterior_sample_.set_debug_name("posterior_sample");
     scale_values_.set_debug_name("scale_values");
     depth_output_.set_debug_name("depth_output");
+    depth_minimum_.set_debug_name("depth_minimum");
+    normalize_depth_.set_debug_name("normalize_depth");
+    depth_to_image_.set_debug_name("depth_to_image");
     scheduler_target_.set_debug_name("scheduler_target");
     ddim_step_.set_debug_name("ddim_step");
 }
@@ -1243,6 +1268,29 @@ void VulkanOperators::preprocess_rgb(
         divide_up(static_cast<std::uint32_t>(count), 256));
 }
 
+void VulkanOperators::preprocess_texture(
+    VulkanBuffer& output, const VulkanImage& input,
+    std::uint32_t source_width, std::uint32_t source_height,
+    std::uint32_t target_width, std::uint32_t target_height) {
+    require_bytes(output, std::uint64_t(target_width) * target_height * 3,
+                  "texture preprocessing output");
+    struct Parameters { std::uint32_t source_width, source_height, target_width, target_height; }
+        parameters{source_width, source_height, target_width, target_height};
+    context_.dispatch_image_to_buffer(
+        preprocess_texture_, input, output, &parameters, sizeof(parameters),
+        divide_up(target_width, 16), divide_up(target_height, 16));
+}
+
+void VulkanOperators::seeded_noise(
+    VulkanBuffer& noise, std::uint32_t count, std::uint64_t seed) {
+    require_bytes(noise, count, "seeded noise");
+    struct Parameters { std::uint32_t count, seed_low, seed_high; }
+        parameters{count, static_cast<std::uint32_t>(seed),
+                   static_cast<std::uint32_t>(seed >> 32u)};
+    context_.dispatch(seeded_noise_, {&noise}, &parameters, sizeof(parameters),
+                      divide_up(count, 256));
+}
+
 void VulkanOperators::posterior_sample(
     VulkanBuffer& output, const VulkanBuffer& posterior,
     const VulkanBuffer& noise, std::uint32_t count) {
@@ -1282,6 +1330,25 @@ void VulkanOperators::depth_output(
     context_.dispatch(
         depth_output_, {&output, &decoded}, &parameters, sizeof(parameters),
         divide_up(target_width * target_height, 256));
+}
+
+void VulkanOperators::normalize_depth(
+    VulkanBuffer& depth, std::uint32_t count) {
+    require_bytes(depth, count, "depth normalization");
+    VulkanBuffer range = context_.create_device_buffer(sizeof(float));
+    context_.dispatch(depth_minimum_, {&depth, &range}, &count, sizeof(count), 1);
+    context_.dispatch(normalize_depth_, {&depth, &range}, &count, sizeof(count),
+                      divide_up(count, 256));
+}
+
+void VulkanOperators::depth_to_image(
+    VulkanImage& output, const VulkanBuffer& depth,
+    std::uint32_t width, std::uint32_t height) {
+    require_bytes(depth, std::uint64_t(width) * height, "depth image input");
+    struct Parameters { std::uint32_t width, height; } parameters{width, height};
+    context_.dispatch_buffer_to_image(
+        depth_to_image_, depth, output, &parameters, sizeof(parameters),
+        divide_up(width, 16), divide_up(height, 16));
 }
 
 void VulkanOperators::scheduler_target(

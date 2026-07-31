@@ -58,7 +58,9 @@ if(MARIGOLD_WITH_VULKAN)
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm group_norm_silu silu nearest concatenate add_channel nchw_tokens
             geglu attention_scores attention_values preprocess_rgb
+            preprocess_texture seeded_noise
             posterior_sample scale_values depth_output scheduler_target
+            depth_minimum normalize_depth depth_to_image
             ddim_step)
         marigold_compile_shader(${SHADER})
     endforeach()
@@ -77,6 +79,7 @@ if(MARIGOLD_WITH_VULKAN)
     target_sources(marigold_model PRIVATE
         src/vulkan.cpp src/operators.cpp src/gpu_model.cpp
         src/marigold_gpu.cpp
+        src/external_gpu.cpp
         ${MARIGOLD_SHADER_HEADERS})
     target_include_directories(
         marigold_model PRIVATE "${MARIGOLD_GENERATED_DIR}")
@@ -96,6 +99,9 @@ target_compile_definitions(
         INFERBRIDGE_HARNESS_BUILDING_LIBRARY)
 target_include_directories(marigold_native PUBLIC include)
 target_link_libraries(marigold_native PRIVATE marigold_model)
+if(WIN32 AND MARIGOLD_WITH_VULKAN)
+    target_link_libraries(marigold_model PUBLIC d3d12 dxgi)
+endif()
 set_target_properties(
     marigold_native PROPERTIES
     OUTPUT_NAME "marigold_native"
