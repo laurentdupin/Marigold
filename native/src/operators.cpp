@@ -9,6 +9,7 @@
 #include "bmm_score_half_spv.h"
 #include "bmm_value_half_spv.h"
 #include "conv2d_spv.h"
+#include "conv2d_pointwise_gemm_spv.h"
 #include "conv2d8_spv.h"
 #include "conv2d_half_spv.h"
 #include "conv2d8_half_spv.h"
@@ -170,6 +171,9 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           20)),
       conv2d_(context.create_pipeline(
           marigold_conv2d_spv, marigold_conv2d_spv_size, 4, 48)),
+      conv2d_pointwise_gemm_(context.create_pipeline(
+          marigold_conv2d_pointwise_gemm_spv,
+          marigold_conv2d_pointwise_gemm_spv_size, 4, 48)),
       conv2d8_(context.create_pipeline(
           marigold_conv2d8_spv, marigold_conv2d8_spv_size, 4, 48)),
       conv2d_half_(context.create_pipeline(
@@ -281,6 +285,7 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     project_tokens_half_.set_debug_name(
         "project_tokens_half");
     conv2d_.set_debug_name("conv2d");
+    conv2d_pointwise_gemm_.set_debug_name("conv2d_pointwise_gemm");
     conv2d8_.set_debug_name("conv2d8");
     conv2d_half_.set_debug_name("conv2d_half");
     conv2d8_half_.set_debug_name("conv2d8_half");
@@ -861,6 +866,10 @@ void VulkanOperators::conv2d_asymmetric(
     const bool stride2_tiled =
         kernel == 3 && stride == 2 &&
         context_.subgroup_size() == 32;
+    const bool pointwise =
+        !winograd && kernel == 1 && stride == 1 &&
+        pad_before == 0 && pad_after == 0 &&
+        input_width == output_width && input_height == output_height;
     const std::uint32_t blocks =
         divide_up(output_channels, winograd ? 4 :
             ((tiled || stride2_tiled) ? 8 : 4));
@@ -870,18 +879,23 @@ void VulkanOperators::conv2d_asymmetric(
         kernel, stride, static_cast<std::int32_t>(pad_before),
         has_bias ? 1u : 0u, 1u, blocks};
     context_.dispatch(
-        winograd ? conv2d_winograd_ :
+        pointwise ? conv2d_pointwise_gemm_ :
+        (winograd ? conv2d_winograd_ :
         (tiled ? conv2d8_tiled16x8_ :
-        (stride2_tiled ? conv2d8_stride2_tiled_ : conv2d_)),
+        (stride2_tiled ? conv2d8_stride2_tiled_ : conv2d_))),
         {&output, &input, &weight, &bias},
         &parameters, sizeof(parameters),
-        winograd
+        pointwise
+            ? divide_up(output_width * output_height, 32)
+            : (winograd
             ? divide_up(divide_up(output_width, 2), 8)
-            : divide_up(output_width, tiled ? 16 : 8),
-        winograd
+            : divide_up(output_width, tiled ? 16 : 8)),
+        pointwise
+            ? divide_up(output_channels, 32)
+            : (winograd
             ? divide_up(divide_up(output_height, 2), 8)
-            : divide_up(output_height, 8),
-        blocks);
+            : divide_up(output_height, 8)),
+        pointwise ? 1 : blocks);
 }
 
 void VulkanOperators::conv_transpose_nonoverlap(

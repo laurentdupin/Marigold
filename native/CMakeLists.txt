@@ -48,7 +48,7 @@ if(MARIGOLD_WITH_VULKAN)
     foreach(SHADER
             add_scaled add add_position bilinear_align_true
             bilinear_align_true_image bmm bmm_score_half bmm_value_half
-            conv2d conv2d8 conv2d_half conv2d8_half conv2d8_tiled
+            conv2d conv2d_pointwise_gemm conv2d8 conv2d_half conv2d8_half conv2d8_tiled
             conv2d8_stride2_tiled
             conv2d8_tiled16x8
             conv2d_winograd
