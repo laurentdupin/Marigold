@@ -135,11 +135,11 @@ validated tensor path plus InferBridge normalization.
 
 ## Embedded InferBridge harness
 
-The same DLL now exports `ibrh_get_api` for InferBridge harness ABI 1.0. It
-accepts a host-memory BGRA8 capture and returns a leased host-memory FP32
-depth image at `marigold_inferbridge_image_shape` dimensions. Correlation
-metadata is preserved, and releasing the job does not invalidate an acquired
-output lease.
+The same DLL exports `ibrh_get_api` for InferBridge harness ABI 2.0. The host
+compatibility path and the Core-owned external-resource path both return FP32
+depth at `marigold_inferbridge_image_shape` dimensions and preserve
+correlation metadata. InferBridge Core, rather than the harness, owns transfer
+resources and output leases.
 
 The single Marigold model entry selects its LCM or full-v1 canonical snapshot
 through `Checkpoint`. `model_path` names that selected snapshot, while
@@ -155,11 +155,9 @@ same default and accepts an optional unsigned `Seed` override for validation.
 Both output paths preserve the worker's antialiased resize,
 `match_input_res=false` dimensions, and `(depth-min)/(1-min)` normalization.
 
-Capability reporting advertises only host input/output and one synchronous
-in-flight job. The complete selected graph runs on the requested Vulkan
-device, but capture upload and depth readback are still host boundaries.
-External GPU resources, asynchronous completion, and cancellation are not
-advertised.
+Capability reporting advertises host compatibility plus asynchronous D3D12
+GPU resources, external synchronization, cancellation, and GPU-resident
+output when exact adapter-local interop is available.
 
 The Windows Release ABI and full-graph harness gates pass for both
 `prs-eth/marigold-lcm-v1-0` and `prs-eth/marigold-v1-0` on the RX 9070.
@@ -167,3 +165,29 @@ They cover the 768x64 image contract, model/sidecar binding, fixed seed,
 normalization, correlation, and output-lease lifetime. The underlying exact
 image/tensor comparisons remain validated on all three GPUs as reported
 above.
+
+## InferBridge ABI2 external resources
+
+The ABI2 harness consumes Core-owned shared D3D12 BGRA8/RGBA8 textures and
+producer fences and writes processed-size normalized depth directly to a
+Core-owned shared R32_FLOAT texture before signaling Core's fence. Input,
+output, and synchronization handles remain borrowed. A persistent worker
+keeps public submit asynchronous and bounds admission to three jobs.
+
+Preprocessing, seeded noise, diffusion, VAE, normalization, and output remain
+on Vulkan. Prompt and the eleven fixed LCM/full-v1 timestep embeddings are
+uploaded once at model load; the tracked transfer counters remain unchanged
+during every frame. The graph uses bounded submissions to recycle diffusion
+intermediates, with the external producer wait only on preprocessing and the
+external consumer signal only on final output. There is no queue-wide idle or
+host fallback under the GPU capability.
+
+| Variant | Relative L1 | Maximum absolute | Submit return | Upload/download delta |
+|---|---:|---:|---:|---:|
+| LCM v1 | `0.000811183` | `0.00300503` | `0.0097 ms` (3 frames) | `0 / 0` bytes |
+| Full v1 | `0.0000580178` | `0.000198424` | `0.0073 ms` | `0 / 0` bytes |
+
+The dedicated 768x64 D3D12/Vulkan canary also proves future-valued producer
+fence import (`completed=0`, requested wait `1`), exact adapter selection,
+sourceFrameId correlation, finite varying R32 output, repeated frame cleanup,
+and clean model/runtime shutdown on the Radeon RX 9070.

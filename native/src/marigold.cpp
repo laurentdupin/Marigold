@@ -326,6 +326,23 @@ const char* marigold_last_error(void) {
     return last_error.c_str();
 }
 
+int marigold_get_transfer_counters(
+    std::uint64_t* upload_bytes, std::uint64_t* download_bytes) {
+    if (!upload_bytes || !download_bytes)
+        return fail(
+            MARIGOLD_INVALID_ARGUMENT,
+            "invalid Marigold transfer counter argument");
+#if defined(MARIGOLD_WITH_VULKAN)
+    marigold_native::global_transfer_counters(
+        *upload_bytes, *download_bytes);
+#else
+    *upload_bytes = 0u;
+    *download_bytes = 0u;
+#endif
+    last_error.clear();
+    return MARIGOLD_OK;
+}
+
 int marigold_create(
     const char* snapshot,
     const char* derived_vae,

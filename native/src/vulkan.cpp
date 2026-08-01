@@ -12,6 +12,9 @@
 namespace marigold_native {
 namespace {
 
+std::atomic<std::uint64_t> global_upload_bytes{0u};
+std::atomic<std::uint64_t> global_download_bytes{0u};
+
 template <typename Handle>
 void exchange_handle(Handle& left, Handle& right) {
     std::swap(left, right);
@@ -31,6 +34,12 @@ bool has_extension(
 #endif
 
 }  // namespace
+
+void global_transfer_counters(
+    std::uint64_t& upload_bytes, std::uint64_t& download_bytes) {
+    upload_bytes = global_upload_bytes.load(std::memory_order_relaxed);
+    download_bytes = global_download_bytes.load(std::memory_order_relaxed);
+}
 
 struct VulkanSubmission::Resources {
     std::vector<VulkanBatchedDescriptor> descriptor_sets;
@@ -1222,7 +1231,11 @@ VulkanSubmission VulkanContext::end_batch_async(
     batch_has_dispatch_ = false;
     try {
         VulkanSubmission result = submit_commands(
-            command, &resources->wait, &resources->signal);
+            command,
+            resources->wait.semaphore_ != VK_NULL_HANDLE
+                ? &resources->wait : nullptr,
+            resources->signal.semaphore_ != VK_NULL_HANDLE
+                ? &resources->signal : nullptr);
         result.resources_ = resources.release();
         return result;
     } catch (...) {
@@ -1336,6 +1349,8 @@ void VulkanContext::upload(
     tensor_upload_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    global_upload_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     std::memcpy(staging.mapped_, data, bytes);
     copy_buffer_raw(
@@ -1352,6 +1367,8 @@ void VulkanContext::download(
     tensor_download_bytes_.fetch_add(
         static_cast<std::uint64_t>(bytes),
         std::memory_order_relaxed);
+    global_download_bytes.fetch_add(
+        static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
     VulkanBuffer staging = create_host_buffer(bytes);
     copy_buffer_raw(
         source.buffer_, staging.buffer_, 0, 0, bytes);

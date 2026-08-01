@@ -139,6 +139,16 @@ target_include_directories(
     marigold_harness_full_graph PRIVATE include)
 target_link_libraries(
     marigold_harness_full_graph PRIVATE marigold_native)
+if(WIN32 AND MARIGOLD_WITH_VULKAN)
+    add_executable(
+        marigold_d3d12_abi2_full_graph
+        tests/d3d12_abi2_full_graph.cpp)
+    target_include_directories(
+        marigold_d3d12_abi2_full_graph PRIVATE include)
+    target_link_libraries(
+        marigold_d3d12_abi2_full_graph PRIVATE
+        marigold_native d3d12 dxgi)
+endif()
 
 enable_testing()
 add_test(NAME marigold_model_probe_usage COMMAND marigold_model_probe)

@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -26,6 +28,11 @@
 
 namespace marigold_native {
 namespace {
+
+bool stage_diagnostics_enabled() {
+    const char* value = std::getenv("MARIGOLD_STAGE_DIAGNOSTICS");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
 
 void inferbridge_shape(
     std::uint32_t width, std::uint32_t height,
@@ -114,11 +121,14 @@ class ExternalJobImpl final : public ExternalJob {
 public:
     ExternalJobImpl(
         std::shared_ptr<ExternalGpu> owner, VulkanImage input,
-        VulkanImage output, VulkanSubmission submission)
+        VulkanImage output, VulkanSubmission submission,
+        std::shared_ptr<std::mutex> record_mutex)
         : owner_(std::move(owner)), input_(std::move(input)),
-          output_(std::move(output)), submission_(std::move(submission)) {}
+          output_(std::move(output)), submission_(std::move(submission)),
+          record_mutex_(std::move(record_mutex)) {}
     ~ExternalJobImpl() override {
         try { submission_.wait(); } catch (...) {}
+        std::lock_guard<std::mutex> lock(*record_mutex_);
         submission_ = {};
         output_ = {};
         input_ = {};
@@ -136,6 +146,7 @@ private:
     VulkanImage input_;
     VulkanImage output_;
     mutable VulkanSubmission submission_;
+    std::shared_ptr<std::mutex> record_mutex_;
     std::atomic<bool> cancelled_{false};
     mutable std::atomic<bool> complete_{false};
 };
@@ -149,9 +160,8 @@ public:
         std::uint32_t device_index)
         : model_(root, vae_model, false), context_(device_index),
           unet_(model_.unet(), context_), vae_(model_.vae(), context_),
-          operators_(context_), prompt_(load_empty_prompt_cache(
-              prompt_cache, static_cast<std::uint32_t>(
-                  model_.unet().tensor("conv_in.weight").dimensions[1]))),
+          operators_(context_),
+          prompt_(load_empty_prompt_cache(prompt_cache, full_v1)),
           graph_(context_, unet_, vae_, operators_, prompt_, full_v1)
 #if defined(_WIN32)
           , d3d12_(matching_d3d12_device(context_.adapter_luid()))
@@ -189,7 +199,7 @@ public:
         validate_input(d3d12_.Get(), request);
         validate_output(d3d12_.Get(), request);
         try {
-            std::lock_guard<std::mutex> lock(record_mutex_);
+            std::lock_guard<std::mutex> lock(*record_mutex_);
             std::uint32_t processing_width = 0u;
             std::uint32_t processing_height = 0u;
             inferbridge_shape(request.width, request.height,
@@ -215,15 +225,16 @@ public:
             VulkanSemaphore signal = context_.import_d3d12_fence(
                 reinterpret_cast<void*>(request.signal_fence_handle),
                 request.signal_fence_value);
-            VulkanSubmission submission = context_.batch_async(
-                std::move(wait), std::move(signal), [&] {
+            VulkanBuffer rgb;
+            VulkanBuffer target;
+            VulkanSubmission preprocessing;
+            try {
+                preprocessing = context_.batch_async(
+                    std::move(wait), {}, [&] {
                     context_.acquire_external_image(
                         input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
-                    context_.acquire_external_image(
-                        output, VK_IMAGE_LAYOUT_GENERAL,
-                        VK_ACCESS_SHADER_WRITE_BIT);
-                    VulkanBuffer rgb = context_.create_device_buffer(
+                    rgb = context_.create_device_buffer(
                         std::uint64_t(processing_width) * processing_height *
                         3 * sizeof(float));
                     operators_.preprocess_texture(
@@ -232,26 +243,75 @@ public:
                     const std::uint32_t noise_count =
                         4u * (processing_width / 8u) *
                         (processing_height / 8u);
-                    VulkanBuffer target = context_.create_device_buffer(
+                    target = context_.create_device_buffer(
                         std::uint64_t(noise_count) * sizeof(float));
                     operators_.seeded_noise(target, noise_count, request.seed);
-                    VulkanBuffer depth = graph_.infer_device(
-                        std::move(rgb), processing_width, processing_height,
-                        std::move(target));
-                    operators_.normalize_depth(
-                        depth, processing_width * processing_height);
-                    operators_.depth_to_image(
-                        output, depth, processing_width, processing_height);
                     context_.release_external_image(
                         input, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                         VK_ACCESS_SHADER_READ_BIT);
+                    });
+                preprocessing.wait();
+                preprocessing = {};
+                if (stage_diagnostics_enabled())
+                    std::fprintf(
+                        stderr, "marigold-stage: preprocess/noise complete\n");
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Marigold preprocess/noise stage failed: ") +
+                    error.what());
+            }
+            // The graph's existing bounded batches keep the diffusion
+            // intermediates device-resident while allowing completed
+            // operator groups to recycle memory. This wait occurs only on
+            // the persistent harness worker, never in public submit().
+            VulkanBuffer depth;
+            try {
+                depth = graph_.infer_device(
+                    std::move(rgb), processing_width, processing_height,
+                    std::move(target));
+                if (stage_diagnostics_enabled())
+                    std::fprintf(
+                        stderr, "marigold-stage: bounded graph complete\n");
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Marigold bounded diffusion/VAE stage failed: ") +
+                    error.what());
+            }
+            try {
+                operators_.normalize_depth(
+                    depth, processing_width * processing_height);
+                if (stage_diagnostics_enabled())
+                    std::fprintf(
+                        stderr, "marigold-stage: normalization complete\n");
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Marigold normalization stage failed: ") +
+                    error.what());
+            }
+            VulkanSubmission submission;
+            try {
+                submission = context_.batch_async(
+                    {}, std::move(signal), [&] {
+                    context_.acquire_external_image(
+                        output, VK_IMAGE_LAYOUT_GENERAL,
+                        VK_ACCESS_SHADER_WRITE_BIT);
+                    operators_.depth_to_image(
+                        output, depth, processing_width, processing_height);
                     context_.release_external_image(
                         output, VK_IMAGE_LAYOUT_GENERAL,
                         VK_ACCESS_SHADER_WRITE_BIT);
-                });
+                    });
+                if (stage_diagnostics_enabled())
+                    std::fprintf(
+                        stderr, "marigold-stage: final output submitted\n");
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    std::string("Marigold final R32 output stage failed: ") +
+                    error.what());
+            }
             return std::make_shared<ExternalJobImpl>(
                 shared_from_this(), std::move(input), std::move(output),
-                std::move(submission));
+                std::move(submission), record_mutex_);
         } catch (...) {
             throw;
         }
@@ -274,7 +334,7 @@ private:
     MarigoldGpuGraph graph_;
 #if defined(_WIN32)
     ComPtr<ID3D12Device> d3d12_;
-    std::mutex record_mutex_;
+    std::shared_ptr<std::mutex> record_mutex_ = std::make_shared<std::mutex>();
 #endif
 };
 

@@ -291,8 +291,8 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
           marigold_normalize_depth_spv, marigold_normalize_depth_spv_size, 2, 4)),
       depth_to_image_(context.create_pipeline(
           marigold_depth_to_image_spv, marigold_depth_to_image_spv_size,
-          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, 8)),
+          {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+           VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, 8)),
       scheduler_target_(context.create_pipeline(
           marigold_scheduler_target_spv,
           marigold_scheduler_target_spv_size, 2, 4)),

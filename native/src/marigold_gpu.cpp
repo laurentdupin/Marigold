@@ -1,5 +1,6 @@
 #include "marigold_gpu.h"
 
+#include <algorithm>
 #include <chrono>
 #include <array>
 #include <cmath>
@@ -43,6 +44,26 @@ public:
             context_.upload(
                 prompt_.buffer, prompt.values.data(),
                 prompt.values.size() * sizeof(float));
+        }
+        constexpr std::array<std::uint32_t, 11> timesteps = {
+            999, 901, 801, 701, 601, 501, 401, 301, 201, 101, 1};
+        for (std::size_t slot = 0; slot < timesteps.size(); ++slot) {
+            std::vector<float> values(320);
+            for (std::uint32_t i = 0; i < 160; ++i) {
+                const float frequency = std::exp(
+                    -std::log(10000.0f) * static_cast<float>(i) / 160.0f);
+                values[i] = std::cos(
+                    static_cast<float>(timesteps[slot]) * frequency);
+                values[160 + i] = std::sin(
+                    static_cast<float>(timesteps[slot]) * frequency);
+            }
+            timestep_inputs_[slot].tokens = 1;
+            timestep_inputs_[slot].dimensions = 320;
+            timestep_inputs_[slot].buffer = context_.create_device_buffer(
+                values.size() * sizeof(float));
+            context_.upload(
+                timestep_inputs_[slot].buffer, values.data(),
+                values.size() * sizeof(float));
         }
     }
 
@@ -570,20 +591,20 @@ private:
     }
 
     GpuTokens time_embedding(std::uint32_t timestep_value) {
-        std::vector<float> values(320);
-        for (std::uint32_t i = 0; i < 160; ++i) {
-            const float frequency = std::exp(
-                -std::log(10000.0f) * static_cast<float>(i) / 160.0f);
-            values[i] = std::cos(
-                static_cast<float>(timestep_value) * frequency);
-            values[160 + i] = std::sin(
-                static_cast<float>(timestep_value) * frequency);
-        }
+        constexpr std::array<std::uint32_t, 11> timesteps = {
+            999, 901, 801, 701, 601, 501, 401, 301, 201, 101, 1};
+        const auto found = std::find(
+            timesteps.begin(), timesteps.end(), timestep_value);
+        if (found == timesteps.end())
+            throw std::invalid_argument("unsupported Marigold timestep");
+        const std::size_t slot = static_cast<std::size_t>(
+            std::distance(timesteps.begin(), found));
         GpuTokens timestep{
-            context_.create_device_buffer(values.size() * sizeof(float)),
+            context_.create_device_buffer(320 * sizeof(float)),
             1, 320};
-        context_.upload(
-            timestep.buffer, values.data(), values.size() * sizeof(float));
+        context_.copy(
+            timestep.buffer, 0, timestep_inputs_[slot].buffer, 0,
+            320 * sizeof(float));
         GpuTokens time = embedding_mlp(
             std::move(timestep), "time_embedding");
         return time;
@@ -782,6 +803,7 @@ private:
     VulkanOperators& operators_;
     VulkanBuffer zero_bias_;
     GpuTokens prompt_;
+    std::array<GpuTokens, 11> timestep_inputs_;
 };
 }
 

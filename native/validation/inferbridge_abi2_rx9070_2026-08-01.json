@@ -1,0 +1,50 @@
+{
+  "date": "2026-08-01",
+  "adapter": {
+    "name": "AMD Radeon RX 9070",
+    "luid": "8ea8010000000000"
+  },
+  "contract": "InferBridge harness ABI 2.0 Core-owned D3D12/Vulkan transfers",
+  "dll": {
+    "relativePath": "native/out/foundation/Release/marigold_native.dll",
+    "sha256": "e14aa9740be6b5109dcbf568ecbc77352cde2f50aedfd4cb5bfa4c101d5a2ecf",
+    "bytes": 840192
+  },
+  "variants": [
+    {
+      "id": "lcm-v1",
+      "snapshotRevision": "04a73502f7fd8fc5e59947b9df3b2266d71d6849",
+      "relativeL1": 0.000811183,
+      "maximumAbsolute": 0.00300503,
+      "frames": 3,
+      "maximumSubmitReturnMs": 0.0097,
+      "uploadByteDelta": 0,
+      "downloadByteDelta": 0,
+      "sourceFrameIdRange": [7007, 7009]
+    },
+    {
+      "id": "full-v1",
+      "snapshotRevision": "f4fc453d7d217cbe30ddcad3eb311d1ad9a11c4c",
+      "relativeL1": 0.0000580178,
+      "maximumAbsolute": 0.000198424,
+      "frames": 1,
+      "maximumSubmitReturnMs": 0.0073,
+      "uploadByteDelta": 0,
+      "downloadByteDelta": 0,
+      "sourceFrameIdRange": [7007, 7007]
+    }
+  ],
+  "checks": {
+    "exactAdapterLuid": true,
+    "coreOwnedInputOutput": true,
+    "futureValuedProducerFence": true,
+    "explicitWaitSignalFences": true,
+    "gpuSeedGeneration": true,
+    "finiteVaryingR32Output": true,
+    "sourceFrameCorrelation": true,
+    "repeatedFrameCleanup": true,
+    "cleanShutdown": true,
+    "zeroHostTransfers": true,
+    "queueWideIdleCalls": 0
+  }
+}

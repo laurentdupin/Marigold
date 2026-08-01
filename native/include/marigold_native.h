@@ -35,6 +35,8 @@ typedef enum marigold_model_variant {
 
 MARIGOLD_API uint32_t marigold_native_abi_version(void);
 MARIGOLD_API const char* marigold_last_error(void);
+MARIGOLD_API int marigold_get_transfer_counters(
+    uint64_t* upload_bytes, uint64_t* download_bytes);
 
 MARIGOLD_API int marigold_create(
     const char* snapshot_root_utf8,

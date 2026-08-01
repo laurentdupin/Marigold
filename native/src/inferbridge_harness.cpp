@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -300,6 +301,9 @@ private:
                 job->gpu_state.store(job->cancel_requested.load() ?
                     IBRH_JOB_CANCELLED : IBRH_JOB_RUNNING);
             } catch (const std::exception& error) {
+                std::fprintf(
+                    stderr, "Marigold GPU submission failed: %s\n",
+                    error.what());
                 {
                     std::lock_guard<std::mutex> lock(job->gpu_mutex);
                     job->gpu_error = error.what();

@@ -34,11 +34,17 @@ int main(int argc, char** argv) {
         return 2;
     }
     marigold_context* context = nullptr;
+    const std::string snapshot = argv[1];
+    const marigold_model_variant variant =
+        snapshot.find("marigold-v1-0") != std::string::npos &&
+        snapshot.find("lcm") == std::string::npos ?
+            MARIGOLD_MODEL_FULL_V1 : MARIGOLD_MODEL_LCM_V1;
     const int create_status = argc >= 6
-        ? marigold_create_vulkan(
-            argv[1], argv[2], argv[3],
+        ? marigold_create_vulkan_variant(
+            argv[1], argv[2], argv[3], variant,
             static_cast<std::uint32_t>(std::stoul(argv[5])), &context)
-        : marigold_create(argv[1], argv[2], argv[3], &context);
+        : marigold_create_variant(
+            argv[1], argv[2], argv[3], variant, &context);
     if (create_status != MARIGOLD_OK) {
         std::cerr << marigold_last_error() << "\n";
         return 1;
