@@ -53,7 +53,6 @@ def main() -> None:
             root / "unet" / "diffusion_pytorch_model.fp16.safetensors",
             model["unet"],
         ),
-        "VAE": (root / "vae" / model["vae_file"], model["vae"]),
         "text encoder": (
             root / "text_encoder" / "model.fp16.safetensors",
             TEXT_SHA,
@@ -65,6 +64,15 @@ def main() -> None:
             raise RuntimeError(
                 f"{label} hash mismatch: expected {expected}, got {actual}"
             )
+
+    # The LCM VAE used by the native harness is a separate canonical artifact,
+    # because the creator's fp16 snapshot does not contain the original .bin
+    # file. Its dedicated VAE converter verifies that artifact's immutable
+    # hash. The prompt cache depends only on the tokenizer/text encoder and
+    # UNet snapshot, so requiring the separate VAE inside this snapshot made a
+    # clean product installation impossible. The fixed VAE hash remains in the
+    # cache header to bind both independently verified derived artifacts to the
+    # same official model publication.
     if args.reuse_prompt_cache:
         source = args.reuse_prompt_cache.read_bytes()
         if (

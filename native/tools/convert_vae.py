@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import os
+import shutil
+import struct
 from pathlib import Path
 
 import torch
@@ -13,6 +17,33 @@ from safetensors.torch import save_file
 CANONICAL_SHA256 = (
     "a4302e1efa25f3a47ceb7536bc335715ad9d1f203e90c2d25507600d74006e89"
 )
+
+
+def canonicalize_safetensors_header(path: Path) -> None:
+    """Replace safetensors' unordered metadata JSON with canonical JSON."""
+    temporary = path.with_name(path.name + ".canonical.tmp")
+    try:
+        with path.open("rb") as source:
+            encoded_length = source.read(8)
+            if len(encoded_length) != 8:
+                raise RuntimeError("truncated safetensors header length")
+            header_length = struct.unpack("<Q", encoded_length)[0]
+            encoded_header = source.read(header_length)
+            if len(encoded_header) != header_length:
+                raise RuntimeError("truncated safetensors header")
+            header = json.loads(encoded_header)
+            canonical = json.dumps(
+                header, ensure_ascii=False, separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            canonical += b" " * (-len(canonical) % 8)
+            with temporary.open("wb") as destination:
+                destination.write(struct.pack("<Q", len(canonical)))
+                destination.write(canonical)
+                shutil.copyfileobj(source, destination, 8 * 1024 * 1024)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -51,9 +82,10 @@ def main() -> None:
         metadata={
             "format": "pt",
             "canonical_sha256": CANONICAL_SHA256,
-            "converter": "marigold-vae-weights-only-v1",
+            "converter": "marigold-vae-weights-only-v2",
         },
     )
+    canonicalize_safetensors_header(Path(args.output_safetensors))
 
 
 if __name__ == "__main__":
