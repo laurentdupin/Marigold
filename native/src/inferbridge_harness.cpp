@@ -35,6 +35,7 @@ struct ibrh_runtime {
     std::string error;
     int32_t vulkan_device_index = 0;
     uint64_t adapter_luid = 0u;
+    bool force_host_transfers = false;
 };
 
 struct ibrh_model {
@@ -378,6 +379,10 @@ ibrh_result IBRH_CALL runtime_create(
     auto* runtime = new (std::nothrow) ibrh_runtime();
     if (runtime == nullptr) return IBRH_ERROR_INTERNAL;
     const std::string device = copy_string(request->requested_device_json);
+    std::string transfer_mode;
+    runtime->force_host_transfers =
+        json_string(device, "transfer_mode", transfer_mode) &&
+        transfer_mode == "host";
     uint64_t index = 0u;
     if (json_uint64(device, "index", index)) {
         if (index > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
@@ -437,7 +442,7 @@ ibrh_result IBRH_CALL model_load(
     model->model_path = path;
     model->prompt_cache = prompt_cache;
 #if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-    if (runtime->adapter_luid != 0u) {
+    if (runtime->adapter_luid != 0u && !runtime->force_host_transfers) {
         try {
             model->external_gpu = marigold_native::create_external_gpu(
                 path, vae_model, prompt_cache,

@@ -256,6 +256,7 @@ struct Abi2Device {
 Abi2Device select_abi2_device(const ibrh_api& api) {
     ComPtr<IDXGIFactory6> factory;
     check(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
+    const char* requested_luid = std::getenv("MARIGOLD_DEVICE_LUID");
     for (UINT index = 0;; ++index) {
         ComPtr<IDXGIAdapter1> adapter;
         if (factory->EnumAdapters1(index, &adapter) == DXGI_ERROR_NOT_FOUND) break;
@@ -267,6 +268,9 @@ Abi2Device select_abi2_device(const ibrh_api& api) {
             "{\"luid\":\"%02x%02x%02x%02x%02x%02x%02x%02x\"}",
             bytes[0], bytes[1], bytes[2], bytes[3],
             bytes[4], bytes[5], bytes[6], bytes[7]);
+        if (requested_luid != nullptr && requested_luid[0] != '\0' &&
+            std::string(json).find(requested_luid) == std::string::npos)
+            continue;
         ibrh_runtime_create_request request{};
         request.struct_size = sizeof(request);
         request.api_version = IBRH_CURRENT_API_VERSION;
