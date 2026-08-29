@@ -249,6 +249,10 @@ VulkanContext::VulkanContext(
     VkPhysicalDeviceSubgroupSizeControlFeatures subgroup_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES,
     };
+    VkPhysicalDeviceShaderIntegerDotProductFeatures integer_dot_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+    };
+    subgroup_features.pNext = &integer_dot_features;
     VkPhysicalDeviceFeatures2 device_features{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         &subgroup_features,
@@ -261,6 +265,18 @@ VulkanContext::VulkanContext(
         subgroup_control.minSubgroupSize <= 32 &&
         subgroup_control.maxSubgroupSize >= 32;
     subgroup_size_ = subgroup_size_forced_ ? 32u : subgroup.subgroupSize;
+    VkPhysicalDeviceShaderIntegerDotProductProperties integer_dot_properties{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES,
+    };
+    VkPhysicalDeviceProperties2 integer_dot_properties2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        &integer_dot_properties,
+    };
+    vkGetPhysicalDeviceProperties2(physical_device_, &integer_dot_properties2);
+    packed_int8_dot_supported_ =
+        integer_dot_features.shaderIntegerDotProduct == VK_TRUE &&
+        integer_dot_properties
+            .integerDotProduct4x8BitPackedSignedAccelerated == VK_TRUE;
 #if defined(_WIN32)
     VkPhysicalDeviceIDProperties identity{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -425,9 +441,18 @@ VulkanContext::VulkanContext(
         1,
         &priority,
     };
+    VkPhysicalDeviceShaderIntegerDotProductFeatures enabled_integer_dot{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES,
+        nullptr,
+        packed_int8_dot_supported_ ? VK_TRUE : VK_FALSE,
+    };
+    subgroup_features.pNext = packed_int8_dot_supported_
+        ? &enabled_integer_dot : nullptr;
     const VkDeviceCreateInfo device_info{
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        subgroup_size_forced_ ? &subgroup_features : nullptr,
+        subgroup_size_forced_ ? static_cast<void*>(&subgroup_features)
+        : packed_int8_dot_supported_
+        ? static_cast<void*>(&enabled_integer_dot) : nullptr,
         0,
         1,
         &queue_info,

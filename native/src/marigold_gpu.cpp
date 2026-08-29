@@ -228,15 +228,21 @@ private:
                 std::uint64_t(input.tokens) * output_dimensions *
                 sizeof(float)),
             input.tokens, output_dimensions};
-        operators_.linear(
-            output.buffer, input.buffer,
-            context_.subgroup_size() == 32 &&
-                    kernel.half_buffer.handle() != VK_NULL_HANDLE
-                ? kernel.half_buffer : kernel.buffer,
-            bias_name.empty() ? zero_bias_ : tensor(model, bias_name).buffer,
-            input.tokens, input.dimensions, output_dimensions, false, false,
-            context_.subgroup_size() == 32 &&
-                kernel.half_buffer.handle() != VK_NULL_HANDLE);
+        const VulkanBuffer& bias = bias_name.empty()
+            ? zero_bias_ : tensor(model, bias_name).buffer;
+        if (model.uses_int8_weights() &&
+            kernel.int8_buffer.handle() != VK_NULL_HANDLE) {
+            operators_.linear_int8(output.buffer, input.buffer,
+                kernel.int8_buffer, kernel.int8_scales, bias,
+                input.tokens, input.dimensions, output_dimensions);
+        } else {
+            const bool half_weight = context_.subgroup_size() == 32 &&
+                kernel.half_buffer.handle() != VK_NULL_HANDLE;
+            operators_.linear(output.buffer, input.buffer,
+                half_weight ? kernel.half_buffer : kernel.buffer, bias,
+                input.tokens, input.dimensions, output_dimensions, false,
+                false, half_weight);
+        }
         return output;
     }
 
@@ -254,12 +260,19 @@ private:
         const bool half_weight =
             context_.subgroup_size() == 32 &&
             kernel.half_buffer.handle() != VK_NULL_HANDLE;
-        operators_.linear(
-            output.buffer, input.buffer,
-            half_weight ? kernel.half_buffer : kernel.buffer,
-            tensor(model, bias_name).buffer,
-            input.tokens, input.dimensions, output_dimensions,
-            false, false, half_weight);
+        if (model.uses_int8_weights() &&
+            kernel.int8_buffer.handle() != VK_NULL_HANDLE) {
+            operators_.linear_int8(output.buffer, input.buffer,
+                kernel.int8_buffer, kernel.int8_scales,
+                tensor(model, bias_name).buffer, input.tokens,
+                input.dimensions, output_dimensions);
+        } else {
+            operators_.linear(output.buffer, input.buffer,
+                half_weight ? kernel.half_buffer : kernel.buffer,
+                tensor(model, bias_name).buffer, input.tokens,
+                input.dimensions, output_dimensions,
+                false, false, half_weight);
+        }
         return output;
     }
 

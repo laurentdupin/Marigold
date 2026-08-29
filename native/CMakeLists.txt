@@ -66,6 +66,13 @@ if(MARIGOLD_WITH_VULKAN)
             ddim_step)
         marigold_compile_shader(${SHADER})
     endforeach()
+    foreach(SHARED_SHADER quantize_rows_int8 linear_int8_tiled)
+        inferbridge_compile_native_support_shader(
+            NAME "${SHARED_SHADER}" PREFIX marigold
+            GENERATED_DIR "${MARIGOLD_GENERATED_DIR}"
+            EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_binary.cmake"
+            OUT_VAR MARIGOLD_SHADER_HEADERS)
+    endforeach()
 endif()
 
 add_library(marigold_model STATIC

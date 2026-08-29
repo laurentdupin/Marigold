@@ -1,6 +1,7 @@
 #include "inferbridge_harness.h"
 
 #include "marigold_native.h"
+#include "inferbridge/native_harness_precision.h"
 #if defined(MARIGOLD_WITH_VULKAN)
 #include "external_gpu.h"
 #endif
@@ -69,9 +70,11 @@ struct ibrh_job {
     std::atomic<bool> cancel_requested{false};
     std::string gpu_error;
     uintptr_t input_texture_handle = 0u;
+    uint64_t input_texture_identity = 0u;
     uintptr_t input_fence_handle = 0u;
     uint64_t input_fence_value = 0u;
     uintptr_t output_texture_handle = 0u;
+    uint64_t output_texture_identity = 0u;
     uintptr_t output_fence_handle = 0u;
     uint64_t output_fence_value = 0u;
     uint32_t output_width = 0u;
@@ -287,9 +290,11 @@ private:
             }
             try {
                 auto native = gpu_->submit_texture({
-                    job->input_texture_handle, job->width, job->height,
+                    job->input_texture_handle, job->input_texture_identity,
+                    job->width, job->height,
                     job->rgba, job->input_fence_handle,
                     job->input_fence_value, job->output_texture_handle,
+                    job->output_texture_identity,
                     job->output_width, job->output_height,
                     job->output_fence_handle, job->output_fence_value,
                     job->seed,
@@ -427,6 +432,13 @@ ibrh_result IBRH_CALL model_load(
             "Marigold model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    inferbridge::native::Precision precision;
+    try {
+        precision = inferbridge::native::precision_from_parameters_json(parameters);
+    } catch (const std::exception& error) {
+        return fail(runtime, IBRH_ERROR_INVALID_ARGUMENT, error.what());
+    }
+    const inferbridge::native::ScopedPrecisionRequest precision_scope(precision);
     std::string vae_model;
     std::string prompt_cache;
     if (!json_string(parameters, "VaeModel", vae_model) || vae_model.empty() ||
@@ -633,9 +645,11 @@ ibrh_result IBRH_CALL submit(
             return IBRH_ERROR_INTERNAL;
         }
         job->input_texture_handle = static_cast<uintptr_t>(input.native_handle);
+        job->input_texture_identity = input.auxiliary_handle;
         job->input_fence_handle = static_cast<uintptr_t>(wait.native_handle);
         job->input_fence_value = wait.value;
         job->output_texture_handle = static_cast<uintptr_t>(destination.native_handle);
+        job->output_texture_identity = destination.auxiliary_handle;
         job->output_fence_handle = static_cast<uintptr_t>(signal.native_handle);
         job->output_fence_value = signal.value;
         job->output_width = planned_width;

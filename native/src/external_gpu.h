@@ -15,12 +15,14 @@ struct ExternalGpuCapabilities {
 
 struct ExternalTextureRequest {
     std::uintptr_t shared_texture_handle = 0u;
+    std::uint64_t shared_texture_identity = 0u;
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
     bool rgba = false;
     std::uintptr_t wait_fence_handle = 0u;
     std::uint64_t wait_fence_value = 0u;
     std::uintptr_t output_texture_handle = 0u;
+    std::uint64_t output_texture_identity = 0u;
     std::uint32_t output_width = 0u;
     std::uint32_t output_height = 0u;
     std::uintptr_t signal_fence_handle = 0u;

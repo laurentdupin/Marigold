@@ -176,6 +176,9 @@ public:
 
     const std::string& device_name() const { return device_name_; }
     std::uint32_t subgroup_size() const { return subgroup_size_; }
+    bool supports_packed_int8_dot() const {
+        return packed_int8_dot_supported_;
+    }
     const VulkanExternalCapabilities& external_capabilities() const {
         return external_capabilities_;
     }
@@ -423,6 +426,7 @@ private:
     std::string device_name_;
     std::uint32_t subgroup_size_ = 0;
     bool subgroup_size_forced_ = false;
+    bool packed_int8_dot_supported_ = false;
 };
 
 }  // namespace marigold_native
