@@ -8,6 +8,7 @@
 #include "vulkan.h"
 #include "inferbridge/native_harness_resource_lifetime.h"
 #include "inferbridge/native_harness_resource_cache.h"
+#include "inferbridge/native_harness_diffusion_shape.h"
 
 #include <algorithm>
 #include <array>
@@ -40,16 +41,8 @@ void inferbridge_shape(
     std::uint32_t width, std::uint32_t height,
     std::uint32_t& processing_width,
     std::uint32_t& processing_height) {
-    if (width == 0u || height == 0u)
-        throw std::invalid_argument("Marigold image dimensions are empty");
-    constexpr std::uint32_t resolution = 768u;
-    const double scale = std::min(
-        static_cast<double>(resolution) / width,
-        static_cast<double>(resolution) / height);
-    processing_width = std::max(
-        1u, static_cast<std::uint32_t>(width * scale));
-    processing_height = std::max(
-        1u, static_cast<std::uint32_t>(height * scale));
+    inferbridge::native_harness::fit_diffusion_shape(
+        width, height, processing_width, processing_height);
 }
 
 #if defined(_WIN32)

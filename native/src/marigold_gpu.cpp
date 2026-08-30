@@ -4,6 +4,8 @@
 #include <chrono>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -11,6 +13,25 @@
 
 namespace marigold_native {
 namespace {
+
+bool diffusion_profile_enabled() {
+    const char* value = std::getenv("INFERBRIDGE_DIFFUSION_PROFILE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+void report_stage(
+    const char* stage, std::chrono::steady_clock::time_point started) {
+    if (!diffusion_profile_enabled()) return;
+    const double milliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    std::fprintf(stderr, "diffusion-stage marigold %-12s %.3f ms\n",
+                 stage, milliseconds);
+}
+
+void report_stage_start(const char* stage) {
+    if (!diffusion_profile_enabled()) return;
+    std::fprintf(stderr, "diffusion-stage marigold %-12s start\n", stage);
+}
 
 struct GpuTokens {
     VulkanBuffer buffer;
@@ -147,7 +168,10 @@ public:
         const std::uint32_t latent_count =
             4 * latent_width * latent_height;
         GpuImage image{std::move(rgb), 3, height, width};
+        report_stage_start("vae-encode");
+        auto stage_started = std::chrono::steady_clock::now();
         GpuImage posterior = vae_encode(std::move(image));
+        report_stage("vae-encode", stage_started);
         operators_.scale_values(
             posterior.buffer, latent_count, 0.18215f);
         GpuImage target{
@@ -160,10 +184,17 @@ public:
             operators_.concatenate(
                 sample.buffer, posterior.buffer, target.buffer,
                 latent_count, latent_count);
+            report_stage_start("unet");
+            stage_started = std::chrono::steady_clock::now();
             GpuImage prediction = unet_predict(std::move(sample), 999);
+            report_stage("unet", stage_started);
             operators_.scheduler_target(
                 prediction.buffer, target.buffer, latent_count);
-            return vae_decode(std::move(prediction));
+            report_stage_start("vae-decode");
+            stage_started = std::chrono::steady_clock::now();
+            GpuImage decoded = vae_decode(std::move(prediction));
+            report_stage("vae-decode", stage_started);
+            return decoded;
         }
         constexpr std::array<std::uint32_t, 10> timesteps = {
             901, 801, 701, 601, 501, 401, 301, 201, 101, 1};
@@ -198,7 +229,11 @@ public:
         }
         operators_.scale_values(
             target.buffer, latent_count, 1.0f / 0.18215f);
-        return vae_decode(std::move(target));
+        report_stage_start("vae-decode");
+        stage_started = std::chrono::steady_clock::now();
+        GpuImage decoded = vae_decode(std::move(target));
+        report_stage("vae-decode", stage_started);
+        return decoded;
     }
 
     GpuImage test_encode(GpuImage&& image) {

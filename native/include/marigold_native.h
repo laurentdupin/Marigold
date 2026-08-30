@@ -87,8 +87,9 @@ MARIGOLD_API int marigold_infer_rgb_f32(
 
 /*
  * InferBridge image contract. The source is BGRA8. The Python harness first
- * converts BGR to RGB, then resizes the longest edge to 768 with antialiased
- * bilinear filtering. Its match_input_res=false result therefore has the
+ * converts BGR to RGB, then resizes the longest edge to 384 by default with
+ * antialiased bilinear filtering. INFERBRIDGE_DIFFUSION_LONG_EDGE can select
+ * 256 through 1024. Its match_input_res=false result therefore has the
  * processing dimensions returned by marigold_inferbridge_image_shape.
  */
 MARIGOLD_API int marigold_inferbridge_image_shape(
