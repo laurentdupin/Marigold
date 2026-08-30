@@ -4,10 +4,13 @@
 #include "prompt_cache.h"
 #include "unet_cpu.h"
 #include "vae_cpu.h"
+#include "inferbridge/native_harness_diffusion_shape.h"
+#if defined(MARIGOLD_WITH_METAL)
+#include "metal_executor.h"
+#endif
 #if defined(MARIGOLD_WITH_VULKAN)
 #include "gpu_model.h"
 #include "marigold_gpu.h"
-#include "inferbridge/native_harness_diffusion_shape.h"
 #include "operators.h"
 #include "vulkan.h"
 #endif
@@ -25,6 +28,9 @@ struct marigold_context {
     std::unique_ptr<marigold_native::ModelBundle> model;
     marigold_native::TokenTensor prompt;
     marigold_model_variant variant = MARIGOLD_MODEL_LCM_V1;
+#if defined(MARIGOLD_WITH_METAL)
+    std::unique_ptr<marigold_native::MetalExecutor> metal;
+#endif
 #if defined(MARIGOLD_WITH_VULKAN)
     std::unique_ptr<marigold_native::VulkanContext> vulkan;
     std::unique_ptr<marigold_native::GpuModel> gpu_unet;
@@ -408,7 +414,25 @@ int marigold_create_vulkan_variant(
             "invalid Marigold model variant");
     }
     *output = nullptr;
-#if !defined(MARIGOLD_WITH_VULKAN)
+#if defined(MARIGOLD_WITH_METAL)
+    (void)device_index;
+    try {
+        auto context = std::make_unique<marigold_context>();
+        context->model = std::make_unique<marigold_native::ModelBundle>(
+            snapshot, derived_vae);
+        context->variant = variant;
+        context->prompt = marigold_native::load_empty_prompt_cache(
+            prompt_cache, variant == MARIGOLD_MODEL_FULL_V1);
+        context->metal = std::make_unique<marigold_native::MetalExecutor>(
+            *context->model, context->prompt,
+            variant == MARIGOLD_MODEL_FULL_V1);
+        *output = context.release();
+        last_error.clear();
+        return MARIGOLD_OK;
+    } catch (const std::exception& error) {
+        return fail(MARIGOLD_MODEL_ERROR, error);
+    }
+#elif !defined(MARIGOLD_WITH_VULKAN)
     (void)device_index;
     return fail(
         MARIGOLD_RUNTIME_ERROR, "this DLL was built without Vulkan");
@@ -456,6 +480,15 @@ int marigold_infer_rgb_f32_with_noise(
             "invalid Marigold inference argument");
     }
     try {
+#if defined(MARIGOLD_WITH_METAL)
+        if (context->metal) {
+            output_depth(
+                context->metal->infer(rgb, width, height, target_noise),
+                width, height, depth);
+            last_error.clear();
+            return MARIGOLD_OK;
+        }
+#endif
 #if defined(MARIGOLD_WITH_VULKAN)
         if (context->vulkan) {
             marigold_native::VulkanBuffer output =

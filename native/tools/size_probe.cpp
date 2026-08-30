@@ -7,10 +7,10 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    if (argc != 6) {
+    if (argc < 6 || argc > 7) {
         std::cerr
             << "usage: marigold_size_probe "
-               "snapshot derived-vae prompt-cache width height\n";
+               "snapshot derived-vae prompt-cache width height [metal]\n";
         return 2;
     }
     const std::uint32_t width =
@@ -30,8 +30,17 @@ int main(int argc, char** argv) {
     }
     std::vector<float> depth(std::uint64_t(width) * height);
     marigold_context* context = nullptr;
-    int status =
-        marigold_create(argv[1], argv[2], argv[3], &context);
+    const std::string snapshot = argv[1];
+    const marigold_model_variant variant =
+        snapshot.find("marigold-v1-0") != std::string::npos &&
+        snapshot.find("lcm") == std::string::npos
+            ? MARIGOLD_MODEL_FULL_V1 : MARIGOLD_MODEL_LCM_V1;
+    const int create_status = argc == 7
+        ? marigold_create_vulkan_variant(
+            argv[1], argv[2], argv[3], variant, 0u, &context)
+        : marigold_create_variant(
+            argv[1], argv[2], argv[3], variant, &context);
+    int status = create_status;
     if (status == MARIGOLD_OK) {
         status = marigold_infer_rgb_f32(
             context, rgb.data(), width, height, 23, depth.data());

@@ -15,6 +15,15 @@ endif()
 
 option(MARIGOLD_WITH_VULKAN
     "Build the dependency-free Vulkan executor" ON)
+option(MARIGOLD_WITH_METAL
+    "Build the native Metal executor" ${APPLE})
+
+if(MARIGOLD_WITH_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "MARIGOLD_WITH_METAL requires Apple platforms")
+    endif()
+    enable_language(OBJCXX)
+endif()
 
 if(MARIGOLD_WITH_VULKAN)
     find_package(Vulkan REQUIRED COMPONENTS glslc)
@@ -102,6 +111,17 @@ set_target_properties(marigold_model PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(marigold_native SHARED
     src/marigold.cpp
     src/inferbridge_harness.cpp)
+if(MARIGOLD_WITH_METAL)
+    target_sources(marigold_native PRIVATE src/metal_executor.mm)
+    target_link_libraries(marigold_native PRIVATE
+        "-framework Foundation"
+        "-framework Metal"
+        "-framework MetalPerformanceShadersGraph")
+    target_compile_definitions(
+        marigold_native PRIVATE MARIGOLD_WITH_METAL=1)
+    set_source_files_properties(src/metal_executor.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+endif()
 target_compile_definitions(
     marigold_native PRIVATE
         MARIGOLD_NATIVE_BUILD

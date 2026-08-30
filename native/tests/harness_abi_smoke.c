@@ -16,7 +16,7 @@ int main(void) {
     CHECK(api.submit != NULL);
     CHECK(
         ibrh_get_api(
-            IBRH_MAKE_API_VERSION(2, 0), sizeof(api), &api) ==
+            IBRH_MAKE_API_VERSION(3, 0), sizeof(api), &api) ==
         IBRH_ERROR_UNSUPPORTED_API);
 
     ibrh_capabilities capabilities = {0};

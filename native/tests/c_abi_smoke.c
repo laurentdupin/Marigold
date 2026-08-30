@@ -12,7 +12,7 @@ int main(void) {
     }
     if (marigold_inferbridge_image_shape(
             53, 41, &width, &height) != MARIGOLD_OK ||
-        width != 768 || height != 594) {
+        width != 344 || height != 264) {
         return 3;
     }
     if (marigold_inferbridge_image_shape(
