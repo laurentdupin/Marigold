@@ -697,8 +697,13 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize Marigold Metal");
+        inferbridge::native_harness::metal::label_queue(queue_, "Marigold");
         texture_pipeline_ = std::make_unique<
-            inferbridge::native_harness::metal::TexturePipeline>(device_);
+            inferbridge::native_harness::metal::TexturePipeline>(
+                device_, "Marigold");
+        auxiliary_pool_ = std::make_shared<
+            inferbridge::native_harness::metal::AuxiliaryTensorPool>(
+                device_, "Marigold");
     }
 
     void set_cache_path(const std::string& cache_path) {
@@ -738,19 +743,15 @@ public:
             auto prepared = texture_pipeline_->prepare(
                 texture_request, width, height, mean, deviation);
             const Plan& plan = get_presentation_plan(width, height);
-            id<MTLBuffer> noise_buffer = [device_ newBufferWithBytes:noise.data()
-                length:noise.size() * sizeof(float)
-                options:MTLResourceStorageModeShared];
-            prepared.input_data = [[MPSGraphTensorData alloc]
-                initWithMTLBuffer:prepared.input_buffer
-                shape:shape({1, 3, height, width}) dataType:MPSDataTypeFloat32];
-            prepared.output_data = [[MPSGraphTensorData alloc]
-                initWithMTLBuffer:prepared.output_buffer
-                shape:shape({1, 1, height, width}) dataType:MPSDataTypeFloat32];
+            auto auxiliary = auxiliary_pool_->acquire({
+                {{1, 4, height / 8, width / 8}, MPSDataTypeFloat32,
+                    sizeof(float), MTLResourceStorageModeShared,
+                    "Target Noise"}});
+            std::memcpy(auxiliary->buffer(0).contents, noise.data(),
+                noise.size() * sizeof(float));
+            prepared.retained_resources.push_back(auxiliary);
             NSArray<MPSGraphTensorData*>* inputs = @[prepared.input_data,
-                [[MPSGraphTensorData alloc] initWithMTLBuffer:noise_buffer
-                    shape:shape({1, 4, height / 8, width / 8})
-                    dataType:MPSDataTypeFloat32]];
+                auxiliary->data(0)];
             MPSGraphExecutableExecutionDescriptor* execution =
                 [MPSGraphExecutableExecutionDescriptor new];
             execution.waitUntilCompleted = NO;
@@ -970,6 +971,8 @@ private:
     std::mutex mutex_;
     std::unique_ptr<inferbridge::native_harness::metal::TexturePipeline>
         texture_pipeline_;
+    std::shared_ptr<inferbridge::native_harness::metal::AuxiliaryTensorPool>
+        auxiliary_pool_;
     std::string cache_path_;
 };
 
