@@ -61,13 +61,15 @@ private:
 };
 #endif
 std::shared_ptr<ExternalGpu> create_metal_external_gpu(
-    marigold_context* context) {
+    marigold_context* context, const std::string& cache_path) {
 #if defined(MARIGOLD_WITH_METAL)
     if (!context || !context->metal)
         throw std::invalid_argument("Marigold Metal context is unavailable");
+    context->metal->set_cache_path(cache_path);
     return std::make_shared<MetalContextExternalGpu>(context);
 #else
     (void)context;
+    (void)cache_path;
     throw std::invalid_argument("Marigold was built without Metal");
 #endif
 }

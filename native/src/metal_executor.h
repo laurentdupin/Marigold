@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 namespace marigold_native {
 
@@ -18,6 +19,8 @@ public:
     ~MetalExecutor();
     MetalExecutor(const MetalExecutor&) = delete;
     MetalExecutor& operator=(const MetalExecutor&) = delete;
+
+    void set_cache_path(const std::string& cache_path);
 
     ImageTensor infer(
         const float* rgb,

@@ -701,6 +701,11 @@ public:
             inferbridge::native_harness::metal::TexturePipeline>(device_);
     }
 
+    void set_cache_path(const std::string& cache_path) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        cache_path_ = cache_path;
+    }
+
     std::shared_ptr<ExternalJob> submit_texture(
         const ExternalTextureRequest& request) {
         std::uint32_t width = 0u, height = 0u;
@@ -927,13 +932,10 @@ private:
 
     NSURL* cache_url(const PlanKey& key) const {
         if (@available(macOS 14.0, *)) {
-            NSArray<NSString*>* directories =
-                NSSearchPathForDirectoriesInDomains(
-                    NSCachesDirectory, NSUserDomainMask, YES);
-            if (directories.count == 0) return nil;
-            NSString* directory = [directories.firstObject
-                stringByAppendingPathComponent:
-                    @"DepthExtractor/MarigoldMetalGraphCache-v1"];
+            if (cache_path_.empty()) return nil;
+            NSString* directory = [[NSString
+                stringWithUTF8String:cache_path_.c_str()]
+                stringByAppendingPathComponent:@"MarigoldMetalGraphCache-v1"];
             if (![[NSFileManager defaultManager]
                     createDirectoryAtPath:directory
                     withIntermediateDirectories:YES attributes:nil error:nil])
@@ -968,6 +970,7 @@ private:
     std::mutex mutex_;
     std::unique_ptr<inferbridge::native_harness::metal::TexturePipeline>
         texture_pipeline_;
+    std::string cache_path_;
 };
 
 MetalExecutor::MetalExecutor(
@@ -975,6 +978,10 @@ MetalExecutor::MetalExecutor(
     : impl_(std::make_unique<Impl>(model, prompt, full_v1)) {}
 
 MetalExecutor::~MetalExecutor() = default;
+
+void MetalExecutor::set_cache_path(const std::string& cache_path) {
+    impl_->set_cache_path(cache_path);
+}
 
 ImageTensor MetalExecutor::infer(
     const float* rgb,
