@@ -2,8 +2,9 @@
 
 #include "marigold_native.h"
 #include "inferbridge/native_harness_precision.h"
-#if defined(MARIGOLD_WITH_VULKAN)
 #include "external_gpu.h"
+#if defined(MARIGOLD_WITH_METAL)
+#include "marigold_internal.h"
 #endif
 
 #include <algorithm>
@@ -44,7 +45,8 @@ struct ibrh_model {
     marigold_context* context = nullptr;
     std::string model_path;
     std::string prompt_cache;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
     std::shared_ptr<marigold_native::ExternalGpu> external_gpu;
     std::shared_ptr<MarigoldGpuWorker> gpu_worker;
     std::shared_ptr<std::atomic<uint32_t>> gpu_admissions =
@@ -61,7 +63,8 @@ struct ibrh_job {
     uint32_t width = 0u;
     uint32_t height = 0u;
     std::vector<float> depth;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
     mutable std::mutex gpu_mutex;
     std::shared_ptr<marigold_native::ExternalJob> gpu_job;
     std::shared_ptr<MarigoldGpuAdmission> gpu_admission;
@@ -89,7 +92,7 @@ namespace {
 
 thread_local std::string g_last_error;
 constexpr char kHarnessId[] = "inferbridge.marigold.native";
-constexpr char kHarnessVersion[] = "1.1.0";
+constexpr char kHarnessVersion[] = "1.2.0";
 
 ibrh_result fail(
     ibrh_runtime* runtime, ibrh_result result, const std::string& message) {
@@ -218,7 +221,8 @@ void release_job(ibrh_job* job) {
 
 }  // namespace
 
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
 struct MarigoldGpuAdmission {
     explicit MarigoldGpuAdmission(std::shared_ptr<std::atomic<uint32_t>> value)
         : count(std::move(value)) {}
@@ -365,6 +369,15 @@ ibrh_result IBRH_CALL query_capabilities(
             capabilities->maximum_in_flight_jobs = 3u;
         }
     } catch (...) {}
+#elif defined(MARIGOLD_WITH_METAL) && defined(__APPLE__)
+    capabilities->flags |= IBRH_CAP_ASYNC_SUBMIT |
+        IBRH_CAP_CANCELLATION | IBRH_CAP_GPU_RESOURCES |
+        IBRH_CAP_EXTERNAL_SYNCHRONIZATION | IBRH_CAP_GPU_RESIDENT_OUTPUT;
+    capabilities->input_domain_mask |= 1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->output_domain_mask |= 1ull << IBRH_RESOURCE_DOMAIN_METAL;
+    capabilities->synchronization_mask =
+        1ull << IBRH_SYNC_METAL_SHARED_EVENT;
+    capabilities->maximum_in_flight_jobs = 3u;
 #endif
     capabilities->harness_id = {kHarnessId, sizeof(kHarnessId) - 1u};
     capabilities->harness_version = {
@@ -486,6 +499,12 @@ ibrh_result IBRH_CALL model_load(
             delete model;
             return fail(runtime, status_result(status), message);
         }
+#if defined(MARIGOLD_WITH_METAL) && defined(__APPLE__)
+        model->external_gpu = marigold_native::create_metal_external_gpu(
+            model->context);
+        model->gpu_worker = std::make_shared<MarigoldGpuWorker>(
+            model->external_gpu);
+#endif
     }
     *output = model;
     return IBRH_OK;
@@ -493,7 +512,8 @@ ibrh_result IBRH_CALL model_load(
 
 void IBRH_CALL model_unload(ibrh_model* model) {
     if (model == nullptr) return;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
     if (model->gpu_worker) model->gpu_worker->stop();
     model->gpu_worker.reset();
     model->external_gpu.reset();
@@ -604,28 +624,48 @@ ibrh_result IBRH_CALL submit(
         return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
                     "Marigold Seed must be an unsigned integer");
 
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
-    if (input.domain == IBRH_RESOURCE_DOMAIN_D3D12) {
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
+#if defined(_WIN32)
+    constexpr uint32_t gpu_domain = IBRH_RESOURCE_DOMAIN_D3D12;
+    constexpr uint32_t texture_handle = IBRH_NATIVE_HANDLE_WIN32_SHARED;
+    constexpr uint32_t synchronization_kind = IBRH_SYNC_D3D12_FENCE;
+    constexpr uint32_t event_handle = IBRH_NATIVE_HANDLE_WIN32_SHARED;
+#else
+    constexpr uint32_t gpu_domain = IBRH_RESOURCE_DOMAIN_METAL;
+    constexpr uint32_t texture_handle = IBRH_NATIVE_HANDLE_METAL_TEXTURE;
+    constexpr uint32_t synchronization_kind = IBRH_SYNC_METAL_SHARED_EVENT;
+    constexpr uint32_t event_handle = IBRH_NATIVE_HANDLE_METAL_SHARED_EVENT;
+#endif
+    if (input.domain == gpu_domain) {
         const ibrh_synchronization& wait = input_binding.synchronization;
         const ibrh_synchronization& signal = output_binding.synchronization;
+#if defined(_WIN32)
+        const bool wait_valid = wait.kind == synchronization_kind &&
+            wait.operation == IBRH_SYNC_WAIT &&
+            wait.native_handle_type == event_handle && wait.native_handle;
+#else
+        const bool wait_valid =
+            (wait.kind == IBRH_SYNC_NONE && !wait.native_handle) ||
+            (wait.kind == synchronization_kind &&
+             wait.operation == IBRH_SYNC_WAIT &&
+             wait.native_handle_type == event_handle && wait.native_handle);
+#endif
         if (!model->gpu_worker)
             return fail(model->runtime, IBRH_ERROR_UNSUPPORTED_CAPABILITY,
                         "Marigold GPU model was not loaded for external input");
         if (input.kind != IBRH_RESOURCE_KIND_IMAGE_2D ||
             (input.pixel_format != IBRH_PIXEL_BGRA8 &&
              input.pixel_format != IBRH_PIXEL_RGBA8) ||
-            input.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            input.native_handle_type != texture_handle ||
             !input.native_handle || !input.width || !input.height ||
-            destination.domain != IBRH_RESOURCE_DOMAIN_D3D12 ||
-            destination.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            destination.domain != gpu_domain ||
+            destination.native_handle_type != texture_handle ||
             !destination.native_handle ||
-            wait.kind != IBRH_SYNC_D3D12_FENCE ||
-            wait.operation != IBRH_SYNC_WAIT ||
-            wait.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
-            !wait.native_handle ||
-            signal.kind != IBRH_SYNC_D3D12_FENCE ||
+            !wait_valid ||
+            signal.kind != synchronization_kind ||
             signal.operation != IBRH_SYNC_SIGNAL ||
-            signal.native_handle_type != IBRH_NATIVE_HANDLE_WIN32_SHARED ||
+            signal.native_handle_type != event_handle ||
             !signal.native_handle)
             return fail(model->runtime, IBRH_ERROR_INVALID_ARGUMENT,
                         "Marigold external transfer bindings are invalid");
@@ -724,7 +764,8 @@ ibrh_result IBRH_CALL job_poll(
     if (status_size < sizeof(*status)) return IBRH_ERROR_STRUCT_TOO_SMALL;
     *status = {};
     status->struct_size = sizeof(*status);
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
     if (job->gpu_admission) {
         std::shared_ptr<marigold_native::ExternalJob> gpu_job;
         {
@@ -750,7 +791,8 @@ ibrh_result IBRH_CALL job_poll(
 
 ibrh_result IBRH_CALL job_cancel(ibrh_job* job) {
     if (!job) return IBRH_ERROR_INVALID_ARGUMENT;
-#if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
+#if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
+    (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
     job->cancel_requested.store(true);
     if (auto worker = job->gpu_worker.lock();
         worker && worker->cancel_queued(job)) return IBRH_OK;

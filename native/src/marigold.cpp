@@ -5,6 +5,7 @@
 #include "unet_cpu.h"
 #include "vae_cpu.h"
 #include "inferbridge/native_harness_diffusion_shape.h"
+#include "marigold_internal.h"
 #if defined(MARIGOLD_WITH_METAL)
 #include "metal_executor.h"
 #endif
@@ -38,6 +39,39 @@ struct marigold_context {
     std::unique_ptr<marigold_native::VulkanOperators> operators;
 #endif
 };
+
+namespace marigold_native {
+#if defined(MARIGOLD_WITH_METAL)
+class MetalContextExternalGpu final : public ExternalGpu {
+public:
+    explicit MetalContextExternalGpu(marigold_context* context) : context_(context) {}
+    ExternalGpuCapabilities capabilities() const override { return {true, 0u, 3u}; }
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) override {
+        if (!context_ || !context_->metal)
+            throw std::invalid_argument("Marigold Metal context is unavailable");
+        return context_->metal->submit_texture(request);
+    }
+    void transfer_counters(std::uint64_t& upload,
+                           std::uint64_t& download) const override {
+        upload = 0u; download = 0u;
+    }
+private:
+    marigold_context* context_ = nullptr;
+};
+#endif
+std::shared_ptr<ExternalGpu> create_metal_external_gpu(
+    marigold_context* context) {
+#if defined(MARIGOLD_WITH_METAL)
+    if (!context || !context->metal)
+        throw std::invalid_argument("Marigold Metal context is unavailable");
+    return std::make_shared<MetalContextExternalGpu>(context);
+#else
+    (void)context;
+    throw std::invalid_argument("Marigold was built without Metal");
+#endif
+}
+}
 
 namespace {
 

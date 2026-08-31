@@ -1,4 +1,6 @@
 #include "metal_executor.h"
+#include "inferbridge/native_harness_diffusion_shape.h"
+#include "inferbridge/native_harness_metal_texture.h"
 #include "inferbridge/native_harness_precision.h"
 
 #import <Foundation/Foundation.h>
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -662,6 +665,21 @@ struct Plan {
     MPSGraphExecutable* executable = nil;
 };
 
+class MetalExternalJob final : public ExternalJob {
+public:
+    explicit MetalExternalJob(
+        std::shared_ptr<inferbridge::native_harness::metal::Submission> value)
+        : submission_(std::move(value)) {}
+    ExternalJobState state() const override {
+        if (submission_->cancelled()) return ExternalJobState::cancelled;
+        return submission_->complete() ? ExternalJobState::complete :
+            ExternalJobState::running;
+    }
+    void cancel() override { submission_->cancel(); }
+private:
+    std::shared_ptr<inferbridge::native_harness::metal::Submission> submission_;
+};
+
 }  // namespace
 
 class MetalExecutor::Impl {
@@ -679,6 +697,67 @@ public:
         graph_device_ = [MPSGraphDevice deviceWithMTLDevice:device_];
         if (queue_ == nil || graph_device_ == nil)
             throw std::runtime_error("could not initialize Marigold Metal");
+        texture_pipeline_ = std::make_unique<
+            inferbridge::native_harness::metal::TexturePipeline>(device_);
+    }
+
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request) {
+        std::uint32_t width = 0u, height = 0u;
+        inferbridge::native_harness::fit_diffusion_shape(
+            request.width, request.height, width, height);
+        const std::size_t latent_count = static_cast<std::size_t>(4u) *
+            (width / 8u) * (height / 8u);
+        std::mt19937_64 generator(request.seed);
+        std::normal_distribution<float> normal;
+        std::vector<float> noise(latent_count);
+        for (float& value : noise) value = normal(generator);
+        const float mean[3] = {0.5f, 0.5f, 0.5f};
+        const float deviation[3] = {0.5f, 0.5f, 0.5f};
+        inferbridge::native_harness::metal::Request texture_request;
+        texture_request.input_texture = request.shared_texture_handle;
+        texture_request.input_width = request.width;
+        texture_request.input_height = request.height;
+        texture_request.input_format = request.rgba ?
+            inferbridge::native_harness::metal::PixelFormat::rgba8 :
+            inferbridge::native_harness::metal::PixelFormat::bgra8;
+        texture_request.wait_event = request.wait_fence_handle;
+        texture_request.wait_value = request.wait_fence_value;
+        texture_request.output_texture = request.output_texture_handle;
+        texture_request.output_width = request.output_width;
+        texture_request.output_height = request.output_height;
+        texture_request.signal_event = request.signal_fence_handle;
+        texture_request.signal_value = request.signal_fence_value;
+        std::lock_guard<std::mutex> guard(mutex_);
+        @autoreleasepool {
+            auto prepared = texture_pipeline_->prepare(
+                texture_request, width, height, mean, deviation);
+            const Plan& plan = get_presentation_plan(width, height);
+            id<MTLBuffer> noise_buffer = [device_ newBufferWithBytes:noise.data()
+                length:noise.size() * sizeof(float)
+                options:MTLResourceStorageModeShared];
+            prepared.input_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:prepared.input_buffer
+                shape:shape({1, 3, height, width}) dataType:MPSDataTypeFloat32];
+            prepared.output_data = [[MPSGraphTensorData alloc]
+                initWithMTLBuffer:prepared.output_buffer
+                shape:shape({1, 1, height, width}) dataType:MPSDataTypeFloat32];
+            NSArray<MPSGraphTensorData*>* inputs = @[prepared.input_data,
+                [[MPSGraphTensorData alloc] initWithMTLBuffer:noise_buffer
+                    shape:shape({1, 4, height / 8, width / 8})
+                    dataType:MPSDataTypeFloat32]];
+            MPSGraphExecutableExecutionDescriptor* execution =
+                [MPSGraphExecutableExecutionDescriptor new];
+            execution.waitUntilCompleted = NO;
+            NSArray<MPSGraphTensorData*>* results = [plan.executable
+                runAsyncWithMTLCommandQueue:texture_pipeline_->queue()
+                inputsArray:inputs resultsArray:@[prepared.output_data]
+                executionDescriptor:execution];
+            if (results.count != 1u)
+                throw std::runtime_error("Marigold Metal output binding failed");
+            return std::make_shared<MetalExternalJob>(
+                texture_pipeline_->finish(prepared, width, height));
+        }
     }
 
     ImageTensor infer(
@@ -798,6 +877,54 @@ private:
             .first->second;
     }
 
+    const Plan& get_presentation_plan(
+        std::uint32_t width, std::uint32_t height) {
+        const PlanKey key{-static_cast<int>(width), static_cast<int>(height)};
+        auto found = plans_.find(key);
+        if (found != plans_.end()) return found->second;
+        GraphBuilder builder(model_, prompt_, fp16_, full_v1_, width, height);
+        builder.build();
+        MPSGraph* graph = builder.graph();
+        MPSGraphTensor* low = [graph constantWithScalar:-1.0
+            dataType:MPSDataTypeFloat32];
+        MPSGraphTensor* one = [graph constantWithScalar:1.0
+            dataType:MPSDataTypeFloat32];
+        MPSGraphTensor* decoded = [graph clampWithTensor:builder.decoded()
+            minValueTensor:low maxValueTensor:one name:nil];
+        MPSGraphTensor* depth = [graph meanOfTensor:decoded axes:@[@1] name:nil];
+        depth = [graph multiplicationWithPrimaryTensor:
+            [graph additionWithPrimaryTensor:depth secondaryTensor:one name:nil]
+            secondaryTensor:[graph constantWithScalar:0.5
+                dataType:MPSDataTypeFloat32] name:nil];
+        MPSGraphTensor* minimum = [graph reductionMinimumWithTensor:depth
+            axes:@[@0, @1, @2, @3] name:nil];
+        MPSGraphTensor* denominator = [graph maximumWithPrimaryTensor:
+            [graph subtractionWithPrimaryTensor:one secondaryTensor:minimum name:nil]
+            secondaryTensor:[graph constantWithScalar:1.0e-12
+                dataType:MPSDataTypeFloat32] name:nil];
+        depth = [graph divisionWithPrimaryTensor:
+            [graph subtractionWithPrimaryTensor:depth secondaryTensor:minimum name:nil]
+            secondaryTensor:denominator name:@"normalized_depth"];
+        NSMutableDictionary<MPSGraphTensor*, MPSGraphShapedType*>* feeds =
+            [NSMutableDictionary dictionary];
+        feeds[builder.rgb()] = [[MPSGraphShapedType alloc]
+            initWithShape:shape({1, 3, height, width}) dataType:MPSDataTypeFloat32];
+        feeds[builder.target_noise()] = [[MPSGraphShapedType alloc]
+            initWithShape:shape({1, 4, height / 8, width / 8})
+            dataType:MPSDataTypeFloat32];
+        MPSGraphCompilationDescriptor* descriptor =
+            [MPSGraphCompilationDescriptor new];
+        descriptor.optimizationLevel = MPSGraphOptimizationLevel0;
+        descriptor.waitForCompilationCompletion = YES;
+        MPSGraphExecutable* executable = [graph compileWithDevice:graph_device_
+            feeds:feeds targetTensors:@[depth] targetOperations:nil
+            compilationDescriptor:descriptor];
+        if (executable == nil)
+            throw std::runtime_error("failed to compile Marigold Metal presentation graph");
+        executable.options = MPSGraphOptionsSynchronizeResults;
+        return plans_.emplace(key, Plan{graph, executable}).first->second;
+    }
+
     NSURL* cache_url(const PlanKey& key) const {
         if (@available(macOS 14.0, *)) {
             NSArray<NSString*>* directories =
@@ -839,6 +966,8 @@ private:
     MPSGraphDevice* graph_device_ = nil;
     std::unordered_map<PlanKey, Plan, PlanHash> plans_;
     std::mutex mutex_;
+    std::unique_ptr<inferbridge::native_harness::metal::TexturePipeline>
+        texture_pipeline_;
 };
 
 MetalExecutor::MetalExecutor(
@@ -853,6 +982,11 @@ ImageTensor MetalExecutor::infer(
     std::uint32_t height,
     const float* target_noise) {
     return impl_->infer(rgb, width, height, target_noise);
+}
+
+std::shared_ptr<ExternalJob> MetalExecutor::submit_texture(
+    const ExternalTextureRequest& request) {
+    return impl_->submit_texture(request);
 }
 
 }  // namespace marigold_native

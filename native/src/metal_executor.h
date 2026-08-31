@@ -2,6 +2,7 @@
 
 #include "model_bundle.h"
 #include "transformer_cpu.h"
+#include "external_gpu.h"
 
 #include <cstdint>
 #include <memory>
@@ -23,6 +24,8 @@ public:
         std::uint32_t width,
         std::uint32_t height,
         const float* target_noise);
+    std::shared_ptr<ExternalJob> submit_texture(
+        const ExternalTextureRequest& request);
 
 private:
     class Impl;
