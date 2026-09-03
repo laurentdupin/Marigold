@@ -1,5 +1,6 @@
 #include "gpu_model.h"
 #include "inferbridge/native_harness_precision.h"
+#include "inferbridge/native_harness_vulkan_initialization.h"
 
 #include <array>
 #include <cstring>
@@ -74,7 +75,12 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
             : inferbridge::native::Precision::fp32);
     const bool half_weights = precision_ == inferbridge::native::Precision::fp16;
     tensors_.reserve(model.tensor_count());
-    for (std::string_view name : model.tensor_names()) {
+    inferbridge::native_harness::batch_vulkan_initialization_uploads(
+        context, model.tensor_names(),
+        [&model](std::string_view name) {
+            return model.tensor(name).elements * sizeof(float);
+        },
+        [&](std::string_view name) {
         const TensorView& source = model.tensor(name);
         if (source.elements >
             std::numeric_limits<std::size_t>::max() / sizeof(float)) {
@@ -223,7 +229,7 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
             throw std::runtime_error(
                 "duplicate GPU tensor name: " + std::string(name));
         }
-    }
+        }, 64ull * 1024ull * 1024ull, context.subgroup_size() == 32u);
 }
 
 const GpuTensor& GpuModel::tensor(std::string_view name) const {
