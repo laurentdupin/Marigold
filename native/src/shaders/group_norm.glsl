@@ -1,8 +1,9 @@
 #version 450 core
 layout(local_size_x = 256) in;
-layout(set = 0, binding = 0, std430) buffer Values { float data[]; } values;
-layout(set = 0, binding = 1, std430) readonly buffer Scale { float data[]; } scale;
-layout(set = 0, binding = 2, std430) readonly buffer Bias { float data[]; } bias;
+layout(set = 0, binding = 0, std430) writeonly buffer Output { float data[]; } output_buffer;
+layout(set = 0, binding = 1, std430) readonly buffer Input { float data[]; } input_buffer;
+layout(set = 0, binding = 2, std430) readonly buffer Scale { float data[]; } scale;
+layout(set = 0, binding = 3, std430) readonly buffer Bias { float data[]; } bias;
 layout(push_constant) uniform Parameters {
     uint channels; uint spatial; uint groups; float epsilon;
 } p;
@@ -16,7 +17,7 @@ void main() {
     uint base = group * count;
     float sum = 0.0, square = 0.0;
     for (uint i = lane; i < count; i += 256) {
-        float v = values.data[base + i];
+        float v = input_buffer.data[base + i];
         sum += v; square += v * v;
     }
     sums[lane] = sum; squares[lane] = square;
@@ -32,8 +33,8 @@ void main() {
     float inverse = inversesqrt(squares[0] / float(count) - mean * mean + p.epsilon);
     for (uint i = lane; i < count; i += 256) {
         uint channel = group * channels_per_group + i / p.spatial;
-        values.data[base + i] =
-            (values.data[base + i] - mean) * inverse *
+        output_buffer.data[base + i] =
+            (input_buffer.data[base + i] - mean) * inverse *
             scale.data[channel] + bias.data[channel];
     }
 }

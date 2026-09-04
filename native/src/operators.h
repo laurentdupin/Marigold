@@ -143,7 +143,8 @@ public:
         const VulkanBuffer& right,
         std::uint32_t count);
     void group_norm(
-        VulkanBuffer& values, const VulkanBuffer& scale,
+        VulkanBuffer& output, const VulkanBuffer& input,
+        const VulkanBuffer& scale,
         const VulkanBuffer& bias, std::uint32_t channels,
         std::uint32_t spatial, float epsilon, bool silu = false);
     void silu(VulkanBuffer& values, std::uint32_t count);

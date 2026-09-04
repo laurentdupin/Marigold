@@ -275,10 +275,10 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       relu_(context.create_pipeline(
           marigold_relu_spv, marigold_relu_spv_size, 2, 4)),
       group_norm_(context.create_pipeline(
-          marigold_group_norm_spv, marigold_group_norm_spv_size, 3, 16)),
+          marigold_group_norm_spv, marigold_group_norm_spv_size, 4, 16)),
       group_norm_silu_(context.create_pipeline(
           marigold_group_norm_silu_spv,
-          marigold_group_norm_silu_spv_size, 3, 16)),
+          marigold_group_norm_silu_spv_size, 4, 16)),
       silu_(context.create_pipeline(
           marigold_silu_spv, marigold_silu_spv_size, 1, 4)),
       nearest_(context.create_pipeline(
@@ -1187,13 +1187,15 @@ void VulkanOperators::add(
 }
 
 void VulkanOperators::group_norm(
-    VulkanBuffer& values, const VulkanBuffer& scale,
+    VulkanBuffer& output, const VulkanBuffer& input,
+    const VulkanBuffer& scale,
     const VulkanBuffer& bias, std::uint32_t channels,
     std::uint32_t spatial, float epsilon, bool silu) {
     if (channels == 0 || channels % 32 != 0 || spatial == 0) {
         throw std::invalid_argument("invalid group normalization dimensions");
     }
-    require_bytes(values, std::uint64_t(channels) * spatial, "group values");
+    require_bytes(output, std::uint64_t(channels) * spatial, "group output");
+    require_bytes(input, std::uint64_t(channels) * spatial, "group input");
     require_bytes(scale, channels, "group scale");
     require_bytes(bias, channels, "group bias");
     struct Parameters {
@@ -1202,7 +1204,7 @@ void VulkanOperators::group_norm(
     } parameters{channels, spatial, 32, epsilon};
     context_.dispatch(
         silu ? group_norm_silu_ : group_norm_,
-        {&values, &scale, &bias},
+        {&output, &input, &scale, &bias},
         &parameters, sizeof(parameters), 32);
 }
 

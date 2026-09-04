@@ -23,17 +23,34 @@ int main(void) {
     CHECK(
         api.query_capabilities(sizeof(capabilities), &capabilities) ==
         IBRH_OK);
-    CHECK(capabilities.flags == IBRH_CAP_HOST_MEMORY);
+    CHECK((capabilities.flags & IBRH_CAP_HOST_MEMORY) != 0u);
     CHECK(
-        capabilities.input_domain_mask ==
-        (1ull << IBRH_RESOURCE_DOMAIN_HOST));
+        (capabilities.input_domain_mask &
+         (1ull << IBRH_RESOURCE_DOMAIN_HOST)) != 0u);
     CHECK(
-        capabilities.output_domain_mask ==
-        (1ull << IBRH_RESOURCE_DOMAIN_HOST));
-    CHECK(capabilities.synchronization_mask == 0u);
+        (capabilities.output_domain_mask &
+         (1ull << IBRH_RESOURCE_DOMAIN_HOST)) != 0u);
     CHECK(capabilities.maximum_inputs == 1u);
     CHECK(capabilities.maximum_outputs == 1u);
-    CHECK(capabilities.maximum_in_flight_jobs == 1u);
+    if ((capabilities.flags & IBRH_CAP_GPU_RESOURCES) != 0u) {
+        const uint64_t gpu_flags =
+            IBRH_CAP_ASYNC_SUBMIT | IBRH_CAP_CANCELLATION |
+            IBRH_CAP_GPU_RESOURCES | IBRH_CAP_EXTERNAL_SYNCHRONIZATION |
+            IBRH_CAP_GPU_RESIDENT_OUTPUT;
+        CHECK((capabilities.flags & gpu_flags) == gpu_flags);
+        CHECK(
+            capabilities.input_domain_mask !=
+            (1ull << IBRH_RESOURCE_DOMAIN_HOST));
+        CHECK(
+            capabilities.output_domain_mask !=
+            (1ull << IBRH_RESOURCE_DOMAIN_HOST));
+        CHECK(capabilities.synchronization_mask != 0u);
+        CHECK(capabilities.maximum_in_flight_jobs == 3u);
+    } else {
+        CHECK(capabilities.flags == IBRH_CAP_HOST_MEMORY);
+        CHECK(capabilities.synchronization_mask == 0u);
+        CHECK(capabilities.maximum_in_flight_jobs == 1u);
+    }
     CHECK(
         capabilities.harness_id.size ==
         strlen("inferbridge.marigold.native"));

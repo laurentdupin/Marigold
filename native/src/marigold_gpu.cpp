@@ -252,7 +252,7 @@ public:
 
 private:
     GpuTokens linear(
-        GpuModel& model, GpuTokens&& input,
+        GpuModel& model, const GpuTokens& input,
         const std::string& weight_name,
         const std::string& bias_name = {}) {
         const GpuTensor& kernel = tensor(model, weight_name);
@@ -359,9 +359,25 @@ private:
         const std::string& weight_name, const std::string& bias_name,
         float epsilon = 1.0e-6f, bool silu = false) {
         operators_.group_norm(
-            image.buffer, tensor(model, weight_name).buffer,
+            image.buffer, image.buffer,
+            tensor(model, weight_name).buffer,
             tensor(model, bias_name).buffer, image.channels,
             image.width * image.height, epsilon, silu);
+    }
+
+    GpuImage normalized_copy(
+        GpuModel& model, const GpuImage& input,
+        const std::string& weight_name, const std::string& bias_name,
+        float epsilon = 1.0e-6f, bool silu = false) {
+        GpuImage output{
+            context_.create_device_buffer(elements(input) * sizeof(float)),
+            input.channels, input.height, input.width};
+        operators_.group_norm(
+            output.buffer, input.buffer,
+            tensor(model, weight_name).buffer,
+            tensor(model, bias_name).buffer, input.channels,
+            input.width * input.height, epsilon, silu);
+        return output;
     }
 
     GpuImage copy_image(const GpuImage& input) {
@@ -406,9 +422,8 @@ private:
         GpuImage&& input, const std::string& prefix) {
         GpuImage result;
         context_.batch([&] {
-        GpuImage hidden = copy_image(input);
-        group_norm(
-            vae_, hidden, prefix + ".norm1.weight",
+        GpuImage hidden = normalized_copy(
+            vae_, input, prefix + ".norm1.weight",
             prefix + ".norm1.bias", 1.0e-6f, true);
         hidden = conv(
             vae_, std::move(hidden), prefix + ".conv1.weight",
@@ -488,28 +503,16 @@ private:
         GpuModel& model, const GpuTokens& query_input,
         const GpuTokens& key_value_input, const std::string& prefix,
         std::uint32_t heads) {
-        auto clone_tokens = [&](const GpuTokens& source) {
-            GpuTokens result{
-                context_.create_device_buffer(
-                    std::uint64_t(source.tokens) * source.dimensions *
-                    sizeof(float)),
-                source.tokens, source.dimensions};
-            context_.copy(
-                result.buffer, 0, source.buffer, 0,
-                std::uint64_t(source.tokens) * source.dimensions *
-                sizeof(float));
-            return result;
-        };
         GpuTokens q = linear(
-            model, clone_tokens(query_input), prefix + ".to_q.weight",
+            model, query_input, prefix + ".to_q.weight",
             tensor_exists(model, prefix + ".to_q.bias")
                 ? prefix + ".to_q.bias" : std::string{});
         GpuTokens k = linear(
-            model, clone_tokens(key_value_input), prefix + ".to_k.weight",
+            model, key_value_input, prefix + ".to_k.weight",
             tensor_exists(model, prefix + ".to_k.bias")
                 ? prefix + ".to_k.bias" : std::string{});
         GpuTokens v = linear(
-            model, clone_tokens(key_value_input), prefix + ".to_v.weight",
+            model, key_value_input, prefix + ".to_v.weight",
             tensor_exists(model, prefix + ".to_v.bias")
                 ? prefix + ".to_v.bias" : std::string{});
         GpuTokens attended{
@@ -534,9 +537,8 @@ private:
         GpuImage&& input, const std::string& prefix) {
         GpuImage result;
         context_.batch([&] {
-        GpuImage normalized = copy_image(input);
-        group_norm(
-            vae_, normalized, prefix + ".group_norm.weight",
+        GpuImage normalized = normalized_copy(
+            vae_, input, prefix + ".group_norm.weight",
             prefix + ".group_norm.bias");
         GpuTokens tokens = image_to_tokens(normalized);
         GpuTokens attended = attention(
@@ -627,9 +629,9 @@ private:
     }
 
     GpuTokens embedding_mlp(
-        GpuTokens&& input, const std::string& prefix) {
+        const GpuTokens& input, const std::string& prefix) {
         GpuTokens hidden = linear(
-            unet_, std::move(input), prefix + ".linear_1.weight",
+            unet_, input, prefix + ".linear_1.weight",
             prefix + ".linear_1.bias");
         operators_.silu(
             hidden.buffer, hidden.tokens * hidden.dimensions);
@@ -647,14 +649,8 @@ private:
             throw std::invalid_argument("unsupported Marigold timestep");
         const std::size_t slot = static_cast<std::size_t>(
             std::distance(timesteps.begin(), found));
-        GpuTokens timestep{
-            context_.create_device_buffer(320 * sizeof(float)),
-            1, 320};
-        context_.copy(
-            timestep.buffer, 0, timestep_inputs_[slot].buffer, 0,
-            320 * sizeof(float));
         GpuTokens time = embedding_mlp(
-            std::move(timestep), "time_embedding");
+            timestep_inputs_[slot], "time_embedding");
         return time;
     }
 
@@ -663,9 +659,8 @@ private:
         const std::string& prefix) {
         GpuImage result;
         context_.batch([&] {
-        GpuImage hidden = copy_image(input);
-        group_norm(
-            unet_, hidden, prefix + ".norm1.weight",
+        GpuImage hidden = normalized_copy(
+            unet_, input, prefix + ".norm1.weight",
             prefix + ".norm1.bias", 1.0e-5f, true);
         hidden = conv(
             unet_, std::move(hidden), prefix + ".conv1.weight",
@@ -704,39 +699,24 @@ private:
         std::uint32_t heads) {
         GpuImage result;
         context_.batch([&] {
-        GpuImage normalized = copy_image(input);
-        group_norm(
-            unet_, normalized, prefix + ".norm.weight",
+        GpuImage normalized = normalized_copy(
+            unet_, input, prefix + ".norm.weight",
             prefix + ".norm.bias");
         GpuTokens tokens = image_to_tokens(normalized);
         tokens = linear(
             unet_, std::move(tokens), prefix + ".proj_in.weight",
             prefix + ".proj_in.bias");
         const std::string block = prefix + ".transformer_blocks.0";
-        GpuTokens residual{
-            context_.create_device_buffer(
-                std::uint64_t(tokens.tokens) * tokens.dimensions *
-                sizeof(float)),
-            tokens.tokens, tokens.dimensions};
-        auto save_residual = [&] {
-            context_.copy(
-                residual.buffer, 0, tokens.buffer, 0,
-                std::uint64_t(tokens.tokens) * tokens.dimensions *
-                sizeof(float));
-        };
-        save_residual();
         GpuTokens norm = layer_norm(unet_, tokens, block + ".norm1");
         GpuTokens update = attention(
             unet_, norm, norm, block + ".attn1", heads);
-        add_tokens(update, residual);
+        add_tokens(update, tokens);
         tokens = std::move(update);
-        save_residual();
         norm = layer_norm(unet_, tokens, block + ".norm2");
         update = attention(
             unet_, norm, prompt_, block + ".attn2", heads);
-        add_tokens(update, residual);
+        add_tokens(update, tokens);
         tokens = std::move(update);
-        save_residual();
         norm = layer_norm(unet_, tokens, block + ".norm3");
         GpuTokens projected = linear(
             unet_, std::move(norm), block + ".ff.net.0.proj.weight",
@@ -751,7 +731,7 @@ private:
         update = linear(
             unet_, std::move(gated), block + ".ff.net.2.weight",
             block + ".ff.net.2.bias");
-        add_tokens(update, residual);
+        add_tokens(update, tokens);
         tokens = linear(
             unet_, std::move(update), prefix + ".proj_out.weight",
             prefix + ".proj_out.bias");
