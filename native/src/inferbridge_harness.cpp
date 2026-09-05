@@ -837,6 +837,29 @@ ibrh_result IBRH_CALL get_last_error(
 
 }  // namespace
 
+#if defined(__linux__) && !defined(__ANDROID__) && defined(MARIGOLD_WITH_VULKAN)
+#include "linux_capture.h"
+#include <inferbridge/linux_capture_harness.h>
+namespace {
+struct LinuxCaptureHooks {
+    static ibr_linux_capture_capabilities capabilities(ibrh_model* model) {
+        std::lock_guard<std::mutex> lock(model->submit_mutex);
+        return marigold_linux_capture_capabilities(model->context);
+    }
+    static void infer(ibrh_model* model,const inferbridge::linux_capture::LinuxDmaBufImage& source,
+        const std::string& parameters,float* output,uint64_t frame,uint64_t timestamp) {
+        (void)frame; (void)timestamp;
+        std::lock_guard<std::mutex> lock(model->submit_mutex);
+        uint64_t seed=frame?frame:timestamp?timestamp:model->next_seed.fetch_add(1u);
+        if(parameters.find("\"Seed\"")!=std::string::npos && !json_uint64(parameters,"Seed",seed))
+            throw std::invalid_argument("invalid capture Seed");
+        marigold_infer_linux_capture(model->context,source,seed,output);
+    }
+};
+}
+#include <inferbridge/linux_capture_export.inl>
+#endif
+
 extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     uint32_t requested_api_version, size_t api_size, ibrh_api* api) {
     if (api == nullptr) return IBRH_ERROR_INVALID_ARGUMENT;
@@ -859,5 +882,9 @@ extern "C" IBRH_API ibrh_result IBRH_CALL ibrh_get_api(
     api->job_cancel = job_cancel;
     api->job_release = job_release;
     api->get_last_error = get_last_error;
+
+#if defined(__linux__) && !defined(__ANDROID__) && defined(MARIGOLD_WITH_VULKAN)
+    inferbridge::linux_capture::HarnessAdapter<LinuxCaptureHooks>::install(api);
+#endif
     return IBRH_OK;
 }
