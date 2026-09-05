@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,11 @@ struct GpuTokens {
     VulkanBuffer buffer;
     std::uint32_t tokens = 0;
     std::uint32_t dimensions = 0;
+};
+
+struct ProjectedKeyValue {
+    GpuTokens key;
+    GpuTokens value;
 };
 
 std::uint64_t elements(const GpuImage& image) {
@@ -507,21 +513,46 @@ private:
             model, query_input, prefix + ".to_q.weight",
             tensor_exists(model, prefix + ".to_q.bias")
                 ? prefix + ".to_q.bias" : std::string{});
-        GpuTokens k = linear(
-            model, key_value_input, prefix + ".to_k.weight",
-            tensor_exists(model, prefix + ".to_k.bias")
-                ? prefix + ".to_k.bias" : std::string{});
-        GpuTokens v = linear(
-            model, key_value_input, prefix + ".to_v.weight",
-            tensor_exists(model, prefix + ".to_v.bias")
-                ? prefix + ".to_v.bias" : std::string{});
+        GpuTokens transient_key;
+        GpuTokens transient_value;
+        const GpuTokens* key = nullptr;
+        const GpuTokens* value = nullptr;
+        if (&key_value_input == &prompt_) {
+            auto cached = prompt_key_values_.find(prefix);
+            if (cached == prompt_key_values_.end()) {
+                ProjectedKeyValue projections{
+                    linear(
+                        model, key_value_input, prefix + ".to_k.weight",
+                        tensor_exists(model, prefix + ".to_k.bias")
+                            ? prefix + ".to_k.bias" : std::string{}),
+                    linear(
+                        model, key_value_input, prefix + ".to_v.weight",
+                        tensor_exists(model, prefix + ".to_v.bias")
+                            ? prefix + ".to_v.bias" : std::string{})};
+                cached = prompt_key_values_.emplace(
+                    prefix, std::move(projections)).first;
+            }
+            key = &cached->second.key;
+            value = &cached->second.value;
+        } else {
+            transient_key = linear(
+                model, key_value_input, prefix + ".to_k.weight",
+                tensor_exists(model, prefix + ".to_k.bias")
+                    ? prefix + ".to_k.bias" : std::string{});
+            transient_value = linear(
+                model, key_value_input, prefix + ".to_v.weight",
+                tensor_exists(model, prefix + ".to_v.bias")
+                    ? prefix + ".to_v.bias" : std::string{});
+            key = &transient_key;
+            value = &transient_value;
+        }
         GpuTokens attended{
             context_.create_device_buffer(
                 std::uint64_t(q.tokens) * q.dimensions * sizeof(float)),
             q.tokens, q.dimensions};
         operators_.attention_separate(
-            attended.buffer, q.buffer, k.buffer, v.buffer,
-            q.tokens, k.tokens, heads, q.dimensions / heads);
+            attended.buffer, q.buffer, key->buffer, value->buffer,
+            q.tokens, key->tokens, heads, q.dimensions / heads);
         return linear(
             model, std::move(attended), prefix + ".to_out.0.weight",
             prefix + ".to_out.0.bias");
@@ -831,6 +862,7 @@ private:
     VulkanOperators& operators_;
     VulkanBuffer zero_bias_;
     GpuTokens prompt_;
+    std::unordered_map<std::string, ProjectedKeyValue> prompt_key_values_;
     std::array<GpuTokens, 11> timestep_inputs_;
 };
 }
