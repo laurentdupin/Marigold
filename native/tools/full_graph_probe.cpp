@@ -36,8 +36,9 @@ int main(int argc, char** argv) {
     marigold_context* context = nullptr;
     const std::string snapshot = argv[1];
     const marigold_model_variant variant =
-        snapshot.find("marigold-v1-0") != std::string::npos &&
-        snapshot.find("lcm") == std::string::npos ?
+        (snapshot.find("marigold-v1-0") != std::string::npos &&
+         snapshot.find("lcm") == std::string::npos) ||
+        std::string(argv[3]).find("full") != std::string::npos ?
             MARIGOLD_MODEL_FULL_V1 : MARIGOLD_MODEL_LCM_V1;
     const int create_status = argc >= 6
         ? marigold_create_vulkan_variant(
