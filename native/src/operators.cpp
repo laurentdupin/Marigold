@@ -410,10 +410,13 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     attention_values_.set_debug_name("attention_values");
     attention_scores_tiled_.set_debug_name("attention_scores_tiled");
     attention_values_tiled_.set_debug_name("attention_values_tiled");
-    // Opt-in during the experiment; missing/0 keeps the pristine scalar route.
+    // INT8 quantization can amplify the tiled reduction's rounding differences.
+    // Keep reduced-precision modes on the scalar path; only FP32 is qualified.
     const char* attention_tiling = std::getenv("MARIGOLD_ATTENTION_TILING");
     attention_tiling_ = attention_tiling != nullptr &&
-        std::string(attention_tiling) == "1";
+        std::string(attention_tiling) == "1" &&
+        inferbridge::native::requested_precision() ==
+            inferbridge::native::Precision::fp32;
     const char* attention_trace = std::getenv("MARIGOLD_ATTENTION_TRACE");
     attention_trace_ = attention_trace != nullptr &&
         std::string(attention_trace) == "1";

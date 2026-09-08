@@ -191,3 +191,48 @@ The dedicated 768x64 D3D12/Vulkan canary also proves future-valued producer
 fence import (`completed=0`, requested wait `1`), exact adapter selection,
 sourceFrameId correlation, finite varying R32 output, repeated frame cleanup,
 and clean model/runtime shutdown on the Radeon RX 9070.
+
+## E7 tiled attention follow-up (2026-09-08)
+
+E7 remains enabled with `MARIGOLD_ATTENTION_TILING=1`, now restricted to
+requested FP32 precision. Missing/0 retains the scalar implementation.
+FP16 and INT8 always use the original path, even with the flag set.
+
+One fixed 1920x1080 real video frame, converted to BT.709 limited I420,
+was measured through the application GPU path with one warmup and one
+measured inference per configuration. These are focused confirmation timings,
+not a new repeated performance sweep. Each original/tiled pair used the same
+frame and compared all 66,048 finite output floats. All six pairs passed
+relative L1 <= 1e-4 and maximum error / original depth range <= 1e-3.
+
+| Variant | GPU | Original ms | E7 ms | Latency reduction | Relative L1 |
+|---|---|---:|---:|---:|---:|
+| lcm-v1 | AMD Radeon RX 9070 | 333.525 | 273.085 | 18.1% | 2.05e-06 |
+| lcm-v1 | AMD Radeon RX 6700 XT | 606.132 | 398.227 | 34.3% | 1.85e-06 |
+| lcm-v1 | NVIDIA GeForce GTX 1080 | 685.727 | 612.401 | 10.7% | 1.87e-06 |
+| full-v1 | AMD Radeon RX 9070 | 1405.338 | 1001.686 | 28.7% | 4.58e-06 |
+| full-v1 | AMD Radeon RX 6700 XT | 2458.350 | 1316.264 | 46.5% | 1.35e-06 |
+| full-v1 | NVIDIA GeForce GTX 1080 | 2304.078 | 1938.482 | 15.9% | 3.78e-06 |
+
+The initial RX 9070 LCM INT8 pair failed: relative L1 0.0245722,
+maximum normalized depth error 0.425765. A repeated original run was
+bit-identical; FP32 passed with the same frame. The new precision guard
+restores bit-identical INT8 output even when the E7 flag is set. All 61
+compiled shaders match the earlier candidate byte-for-byte; only host-side
+precision eligibility changed.
+
+A 20-second 60 Hz streaming check on RX 9070 LCM returned zero measured
+outputs for BOTH original and E7, after successful warmup. Streaming therefore
+has an existing failure in this setup; no throughput improvement is claimed.
+Further streaming runs were stopped. WDDM sampled dedicated memory was
+4550.1 MiB original and 4574.9 MiB E7; these sparse process totals do not
+establish a memory improvement or regression.
+
+Raw logs, invocation/environment receipts, input/output hashes and dumps are
+under `.BuildComponents/Benchmarks/depth-optimization-20260908/E7/followup`
+in the DeepDesktopGodot checkout. The exact frame hash is
+`3fd0680a2581e662908ede367c9dcefb23828a001472622110653736255b6505`;
+guarded DLL SHA-256 is
+`38176293cf412047276525bb43478a2420bd7be4a07e74fefeec5d22a2e75660`.
+This validates FP32 accuracy on the tested frame and confirms latency gains;
+it does not establish general video accuracy or successful live streaming.
