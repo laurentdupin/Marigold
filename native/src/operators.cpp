@@ -49,6 +49,7 @@
 #include "geglu_spv.h"
 #include "attention_scores_spv.h"
 #include "attention_values_spv.h"
+#include "attention_bmm_spv.h"
 #include "preprocess_rgb_spv.h"
 #include "preprocess_texture_spv.h"
 #include "seeded_noise_spv.h"
@@ -61,6 +62,9 @@
 #include "scheduler_target_spv.h"
 #include "ddim_step_spv.h"
 
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -71,6 +75,16 @@ namespace {
 std::uint32_t divide_up(std::uint32_t value, std::uint32_t divisor) {
     return (value + divisor - 1) / divisor;
 }
+
+// Separate-input attention tiles retained by Lotus 19b40d5 / 247de48.
+// Use a distinct pipeline so the existing fused-QKV BMM contract is unchanged.
+struct AttentionBmmParameters {
+    std::uint32_t rows, columns, inner, batches;
+    std::uint32_t weight_transposed, output_token_major, qkv_embedding;
+    std::uint32_t input_qkv_query, weight_qkv_kind, qkv_heads, qkv_tokens;
+    float input_scale;
+};
+static_assert(sizeof(AttentionBmmParameters) == 48);
 
 void require_bytes(
     const VulkanBuffer& buffer,
@@ -297,6 +311,12 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
       attention_values_(context.create_pipeline(
           marigold_attention_values_spv,
           marigold_attention_values_spv_size, 3, 16)),
+      attention_scores_tiled_(context.create_pipeline(
+          marigold_attention_bmm_spv,
+          marigold_attention_bmm_spv_size, 3, 48)),
+      attention_values_tiled_(context.create_pipeline(
+          marigold_attention_bmm_spv,
+          marigold_attention_bmm_spv_size, 3, 48)),
       preprocess_rgb_(context.create_pipeline(
           marigold_preprocess_rgb_spv, marigold_preprocess_rgb_spv_size, 2, 8)),
       preprocess_texture_(context.create_pipeline(
@@ -388,6 +408,15 @@ VulkanOperators::VulkanOperators(VulkanContext& context)
     geglu_.set_debug_name("geglu");
     attention_scores_.set_debug_name("attention_scores");
     attention_values_.set_debug_name("attention_values");
+    attention_scores_tiled_.set_debug_name("attention_scores_tiled");
+    attention_values_tiled_.set_debug_name("attention_values_tiled");
+    // Opt-in during the experiment; missing/0 keeps the pristine scalar route.
+    const char* attention_tiling = std::getenv("MARIGOLD_ATTENTION_TILING");
+    attention_tiling_ = attention_tiling != nullptr &&
+        std::string(attention_tiling) == "1";
+    const char* attention_trace = std::getenv("MARIGOLD_ATTENTION_TRACE");
+    attention_trace_ = attention_trace != nullptr &&
+        std::string(attention_trace) == "1";
     preprocess_rgb_.set_debug_name("preprocess_rgb");
     preprocess_texture_.set_debug_name("preprocess_texture");
     seeded_noise_.set_debug_name("seeded_noise");
@@ -1292,18 +1321,79 @@ void VulkanOperators::geglu(
         divide_up(rows * dimensions, 256));
 }
 
+bool VulkanOperators::tiled_attention_selected(
+    std::uint32_t queries, std::uint32_t keys, std::uint32_t heads) const {
+    // Leave the two-token prompt and other small/asymmetric multi-head cases
+    // on their scalar path. Tail guards in the tile support odd dimensions.
+    return attention_tiling_ && queries >= 32u && keys >= 64u &&
+        (heads == 1u || queries == keys);
+}
+
 void VulkanOperators::attention_separate(
     VulkanBuffer& output, const VulkanBuffer& query,
     const VulkanBuffer& key, const VulkanBuffer& value,
     std::uint32_t queries, std::uint32_t keys,
-    std::uint32_t heads, std::uint32_t head_dimensions) {
+    std::uint32_t heads, std::uint32_t head_dimensions,
+    VulkanBuffer* probability_output) {
+    if (!queries || !keys || !heads || !head_dimensions ||
+        std::uint64_t(heads) * head_dimensions >
+            std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("invalid separate attention dimensions");
+    }
     const std::uint32_t dimensions = heads * head_dimensions;
     require_bytes(query, std::uint64_t(queries) * dimensions, "query");
     require_bytes(key, std::uint64_t(keys) * dimensions, "key");
     require_bytes(value, std::uint64_t(keys) * dimensions, "value");
     require_bytes(output, std::uint64_t(queries) * dimensions, "attention");
-    VulkanBuffer scores = context_.create_device_buffer(
-        std::uint64_t(heads) * queries * keys * sizeof(float));
+    VulkanBuffer owned_scores;
+    if (probability_output == nullptr) {
+        owned_scores = context_.create_device_buffer(
+            std::uint64_t(heads) * queries * keys * sizeof(float));
+        probability_output = &owned_scores;
+    }
+    require_bytes(*probability_output,
+        std::uint64_t(heads) * queries * keys, "attention probabilities");
+    VulkanBuffer& scores = *probability_output;
+    const bool tiled = tiled_attention_selected(queries, keys, heads);
+    if (attention_trace_) {
+        const std::string shape = std::to_string(queries) + "/" +
+            std::to_string(keys) + "/" + std::to_string(heads) + "/" +
+            std::to_string(head_dimensions);
+        if (traced_attention_shapes_.insert(shape).second) {
+            std::fprintf(stderr,
+                "MARIGOLD_ATTENTION_PATH queries=%u keys=%u heads=%u head_dimensions=%u selected=%s\n",
+                queries, keys, heads, head_dimensions, tiled ? "tiled" : "scalar");
+        }
+    }
+    if (tiled) {
+        const bool single_head = heads == 1u;
+        AttentionBmmParameters score_parameters{
+            queries, keys, head_dimensions, heads, 1u, 0u,
+            single_head ? 0u : dimensions, single_head ? 0u : 2u,
+            single_head ? 0u : 3u, single_head ? 0u : heads,
+            single_head ? 0u : queries,
+            1.0f / std::sqrt(static_cast<float>(head_dimensions))};
+        context_.dispatch(
+            attention_scores_tiled_, {&scores, &query, &key},
+            &score_parameters, sizeof(score_parameters),
+            divide_up(keys, 32u), divide_up(queries, 64u), heads);
+        struct SoftmaxParameters {
+            std::uint32_t rows, columns;
+        } softmax{heads * queries, keys};
+        context_.dispatch(
+            softmax_lastdim_, {&scores, &scores},
+            &softmax, sizeof(softmax), softmax.rows);
+        AttentionBmmParameters value_parameters{
+            queries, head_dimensions, keys, heads, 0u,
+            single_head ? 0u : 1u, single_head ? 0u : dimensions,
+            0u, single_head ? 0u : 3u, single_head ? 0u : heads,
+            single_head ? 0u : queries, 1.0f};
+        context_.dispatch(
+            attention_values_tiled_, {&output, &scores, &value},
+            &value_parameters, sizeof(value_parameters),
+            divide_up(head_dimensions, 32u), divide_up(queries, 64u), heads);
+        return;
+    }
     struct Parameters {
         std::uint32_t queries, keys, heads, head_dimensions;
     } parameters{queries, keys, heads, head_dimensions};

@@ -54,7 +54,8 @@ GpuImage marigold_vae_encode_gpu(
 GpuImage marigold_unet_gpu(
     VulkanContext& context, GpuModel& unet, VulkanOperators& operators,
     const TokenTensor& prompt, const float* sample_nchw,
-    std::uint32_t width, std::uint32_t height);
+    std::uint32_t width, std::uint32_t height,
+    std::uint32_t timestep = 999u);
 GpuImage marigold_vae_decode_gpu(
     VulkanContext& context, GpuModel& vae, VulkanOperators& operators,
     const float* latent_nchw, std::uint32_t width, std::uint32_t height);

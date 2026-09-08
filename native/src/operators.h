@@ -4,6 +4,7 @@
 #include <inferbridge/native_harness_int8_workspace.h>
 
 #include <cstdint>
+#include <unordered_set>
 
 namespace marigold_native {
 
@@ -170,7 +171,10 @@ public:
         VulkanBuffer& output, const VulkanBuffer& query,
         const VulkanBuffer& key, const VulkanBuffer& value,
         std::uint32_t queries, std::uint32_t keys,
-        std::uint32_t heads, std::uint32_t head_dimensions = 64);
+        std::uint32_t heads, std::uint32_t head_dimensions = 64,
+        VulkanBuffer* probability_output = nullptr);
+    bool tiled_attention_selected(
+        std::uint32_t queries, std::uint32_t keys, std::uint32_t heads) const;
     void preprocess_rgb(
         VulkanBuffer& output, const VulkanBuffer& input,
         std::uint32_t width, std::uint32_t height);
@@ -203,6 +207,9 @@ public:
 
 private:
     VulkanContext& context_;
+    bool attention_tiling_ = false;
+    bool attention_trace_ = false;
+    std::unordered_set<std::string> traced_attention_shapes_;
     inferbridge::native::Int8ActivationWorkspace<VulkanBuffer> int8_workspace_;
     VulkanPipeline linear_;
     VulkanPipeline linear16_;
@@ -252,6 +259,8 @@ private:
     VulkanPipeline geglu_;
     VulkanPipeline attention_scores_;
     VulkanPipeline attention_values_;
+    VulkanPipeline attention_scores_tiled_;
+    VulkanPipeline attention_values_tiled_;
     VulkanPipeline preprocess_rgb_;
     VulkanPipeline preprocess_texture_;
     VulkanPipeline seeded_noise_;

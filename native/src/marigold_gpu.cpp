@@ -245,8 +245,8 @@ public:
     GpuImage test_encode(GpuImage&& image) {
         return vae_encode(std::move(image));
     }
-    GpuImage test_predict(GpuImage&& sample) {
-        return unet_predict(std::move(sample), 999);
+    GpuImage test_predict(GpuImage&& sample, std::uint32_t timestep) {
+        return unet_predict(std::move(sample), timestep);
     }
     GpuImage test_decode(GpuImage&& latent) {
         return vae_decode(std::move(latent));
@@ -936,7 +936,7 @@ GpuImage marigold_vae_encode_gpu(
 GpuImage marigold_unet_gpu(
     VulkanContext& context, GpuModel& unet, VulkanOperators& operators,
     const TokenTensor& prompt, const float* input,
-    std::uint32_t width, std::uint32_t height) {
+    std::uint32_t width, std::uint32_t height, std::uint32_t timestep) {
     Graph graph(context, unet, unet, operators, prompt);
     GpuImage sample{
         context.create_device_buffer(
@@ -945,7 +945,7 @@ GpuImage marigold_unet_gpu(
     context.upload(
         sample.buffer, input,
         std::uint64_t(8) * width * height * sizeof(float));
-    return graph.test_predict(std::move(sample));
+    return graph.test_predict(std::move(sample), timestep);
 }
 
 GpuImage marigold_vae_decode_gpu(

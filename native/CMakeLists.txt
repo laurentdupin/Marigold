@@ -68,7 +68,7 @@ if(MARIGOLD_WITH_VULKAN)
             linear16_half linear_vec8 linear_vec8_half prepare_tokens position_bicubic project_tokens
             project_tokens_half relu softmax_lastdim softmax_lastdim_half
             group_norm group_norm_silu silu nearest concatenate add_channel nchw_tokens
-            geglu attention_scores attention_values preprocess_rgb
+            geglu attention_scores attention_values attention_bmm preprocess_rgb
             preprocess_texture seeded_noise
             posterior_sample scale_values depth_output scheduler_target
             depth_minimum normalize_depth depth_to_image
@@ -152,6 +152,13 @@ target_link_libraries(marigold_full_graph_probe PRIVATE marigold_native)
 add_executable(marigold_size_probe tools/size_probe.cpp)
 target_include_directories(marigold_size_probe PRIVATE include)
 target_link_libraries(marigold_size_probe PRIVATE marigold_native)
+
+if(MARIGOLD_WITH_VULKAN)
+    add_executable(marigold_attention_probe tools/attention_probe.cpp)
+    target_link_libraries(marigold_attention_probe PRIVATE marigold_model)
+    add_executable(marigold_gpu_fixture_probe tools/gpu_fixture_probe.cpp)
+    target_link_libraries(marigold_gpu_fixture_probe PRIVATE marigold_model)
+endif()
 
 add_executable(marigold_c_abi_smoke tests/c_abi_smoke.c)
 target_include_directories(marigold_c_abi_smoke PRIVATE include)
