@@ -88,7 +88,7 @@ struct ibrh_job {
     uint64_t seed = 0u;
     uint32_t long_edge = 768u;
     bool rgba = false;
-    ~ibrh_job() { gpu_job.reset(); gpu_admission.reset(); }
+    ~ibrh_job();
 #endif
 };
 
@@ -259,6 +259,18 @@ public:
         }
         condition_.notify_one();
     }
+    // Releasing a displayed output can run on Godot's render/main thread.
+    // Its Vulkan submission retirement takes the same lifetime lock as the
+    // next inference, so destruction must follow work onto this worker.
+    void retire(std::shared_ptr<marigold_native::ExternalJob> job) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!exited_) retired_.push_back(std::move(job));
+        }
+        condition_.notify_one();
+        // After exit no inference can hold the lifetime domain; local cleanup
+        // is safe, including outputs which outlive model_unload().
+    }
     bool cancel_queued(ibrh_job* job) noexcept {
         bool removed = false;
         {
@@ -288,17 +300,23 @@ private:
         for (;;) {
             ibrh_job* job = nullptr;
             bool stopping = false;
+            std::deque<std::shared_ptr<marigold_native::ExternalJob>> retired;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                condition_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
-                if (queue_.empty()) {
-                    if (stopping_) return;
-                    continue;
+                condition_.wait(lock, [&] { return stopping_ || !queue_.empty() || !retired_.empty(); });
+                if (queue_.empty() && retired_.empty() && stopping_) {
+                    exited_ = true;
+                    return;
                 }
-                job = queue_.front();
-                queue_.pop_front();
+                retired.swap(retired_);
+                if (!queue_.empty()) {
+                    job = queue_.front();
+                    queue_.pop_front();
+                }
                 stopping = stopping_;
             }
+            retired.clear();
+            if (job == nullptr) continue;
             if (stopping || job->cancel_requested.load()) {
                 job->gpu_state.store(IBRH_JOB_CANCELLED);
                 release_job(job);
@@ -341,9 +359,19 @@ private:
     std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<ibrh_job*> queue_;
+    std::deque<std::shared_ptr<marigold_native::ExternalJob>> retired_;
     bool stopping_ = false;
+    bool exited_ = false;
     std::thread thread_;
 };
+
+ibrh_job::~ibrh_job() {
+    if (gpu_job) {
+        if (auto worker = gpu_worker.lock()) worker->retire(std::move(gpu_job));
+        else gpu_job.reset();
+    }
+    gpu_admission.reset();
+}
 #else
 struct MarigoldGpuAdmission {};
 #endif

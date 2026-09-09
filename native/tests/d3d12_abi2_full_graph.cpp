@@ -490,9 +490,10 @@ int main() try {
             "Marigold external output is not varying: min=" +
             std::to_string(minimum) + " max=" + std::to_string(maximum));
     double maximum_submit_ms = submit_ms;
+    double maximum_release_ms = 0.0;
     const char* stress_environment = std::getenv("MARIGOLD_STRESS_FRAMES");
     const std::uint64_t total_frames = stress_environment
-        ? std::max<std::uint64_t>(1u, std::stoull(stress_environment)) : 1u;
+        ? std::max<std::uint64_t>(1u, std::stoull(stress_environment)) : 3u;
     for (std::uint64_t frame = 7008u;
          frame < 7007u + total_frames; ++frame) {
         Capture next_source = upload_texture(selected.device.Get(), queue.Get(),
@@ -516,7 +517,17 @@ int main() try {
         maximum_submit_ms = std::max(maximum_submit_ms,
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - next_start).count());
+        // Give the next inference time to enter its resource lifetime domain.
+        // Retiring the previous completed result must never wait behind it.
+        Sleep(50);
+        const auto release_start = std::chrono::steady_clock::now();
         api.job_release(job);
+        const double release_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - release_start).count();
+        maximum_release_ms = std::max(maximum_release_ms, release_ms);
+        if (release_ms > 50.0)
+            throw std::runtime_error("Completed output release blocked behind inference: " +
+                                     std::to_string(release_ms) + " ms");
         close_capture(source);
         close_output(output);
         source = std::move(next_source);
@@ -539,6 +550,7 @@ int main() try {
     api.model_unload(model); api.runtime_destroy(runtime);
     std::cout << "Marigold ABI2 D3D12/Vulkan passed; frames=" << total_frames
               << "; max_submit_ms=" << maximum_submit_ms
+              << "; max_release_ms=" << maximum_release_ms
               << "; upload_delta=0; download_delta=0; sourceFrameId=7007.."
               << 7006u + total_frames << '\n';
     return 0;
