@@ -1,4 +1,5 @@
 #include "gpu_model.h"
+#include <inferbridge/linux_model_execution_policy.h>
 #include "inferbridge/native_harness_precision.h"
 #include "inferbridge/native_harness_vulkan_initialization.h"
 
@@ -90,8 +91,10 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
         }
         const std::size_t bytes =
             static_cast<std::size_t>(source.elements) * sizeof(float);
+        const bool packed_only = inferbridge::native_harness::linux_packed_weight_only(
+            half_weights, context.subgroup_size(), source.rank, source.dimensions);
         GpuTensor destination{
-            context.create_device_buffer(bytes),
+            packed_only ? VulkanBuffer{} : context.create_device_buffer(bytes),
             {},
             {},
             {},
@@ -105,7 +108,7 @@ GpuModel::GpuModel(const SafeTensors& model, VulkanContext& context)
         for (std::uint64_t index = 0; index < source.elements; ++index) {
             converted[static_cast<std::size_t>(index)] = source.data[index];
         }
-        context.upload(destination.buffer, converted.data(), bytes);
+        if (!packed_only) context.upload(destination.buffer, converted.data(), bytes);
         if (precision_ == inferbridge::native::Precision::int8 &&
             source.rank == 2 && source.dimensions[1] % 4u == 0u) {
             const auto quantized = inferbridge::native::quantize_int8_rows(
