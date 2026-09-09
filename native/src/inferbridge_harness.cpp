@@ -1,6 +1,7 @@
 #include "inferbridge_harness.h"
 
 #include "marigold_native.h"
+#include "inferbridge/native_harness_diffusion_shape.h"
 #include "inferbridge/native_harness_precision.h"
 #include "external_gpu.h"
 #if defined(MARIGOLD_WITH_METAL)
@@ -46,6 +47,7 @@ struct ibrh_model {
     marigold_context* context = nullptr;
     std::string model_path;
     std::string prompt_cache;
+    uint32_t long_edge = 768u;
 #if (defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)) || \
     (defined(MARIGOLD_WITH_METAL) && defined(__APPLE__))
     std::shared_ptr<marigold_native::ExternalGpu> external_gpu;
@@ -84,6 +86,7 @@ struct ibrh_job {
     uint32_t output_width = 0u;
     uint32_t output_height = 0u;
     uint64_t seed = 0u;
+    uint32_t long_edge = 768u;
     bool rgba = false;
     ~ibrh_job() { gpu_job.reset(); gpu_admission.reset(); }
 #endif
@@ -135,10 +138,18 @@ bool json_uint64(
     if (position == std::string::npos) return false;
     position = json.find_first_not_of(" \t\r\n", position + 1u);
     if (position == std::string::npos) return false;
-    if (json[position] == '"') ++position;
+    const bool quoted = json[position] == '"';
+    if (quoted) ++position;
     size_t end = position;
     while (end < json.size() && json[end] >= '0' && json[end] <= '9') ++end;
     if (end == position) return false;
+    size_t suffix = end;
+    if (quoted) {
+        if (suffix >= json.size() || json[suffix] != '"') return false;
+        ++suffix;
+    }
+    suffix = json.find_first_not_of(" \t\r\n", suffix);
+    if (suffix != std::string::npos && json[suffix] != ',' && json[suffix] != '}') return false;
     uint64_t parsed = 0u;
     for (size_t index = position; index < end; ++index) {
         const uint64_t digit =
@@ -294,6 +305,7 @@ private:
                 continue;
             }
             try {
+                const inferbridge::native_harness::ScopedDiffusionShape shape_scope(job->long_edge);
                 auto native = gpu_->submit_texture({
                     job->input_texture_handle, job->input_texture_identity,
                     job->width, job->height,
@@ -447,6 +459,11 @@ ibrh_result IBRH_CALL model_load(
             "Marigold model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    uint64_t long_edge = 768u;
+    if (parameters.find("\"Size\"") != std::string::npos &&
+        (!json_uint64(parameters, "Size", long_edge) || long_edge < 256u || long_edge > 1024u))
+        return fail(runtime, IBRH_ERROR_INVALID_ARGUMENT,
+                    "Marigold Size must be an integer between 256 and 1024");
     inferbridge::native::Precision precision;
     try {
         precision = inferbridge::native::precision_from_parameters_json(parameters);
@@ -466,6 +483,7 @@ ibrh_result IBRH_CALL model_load(
     auto* model = new (std::nothrow) ibrh_model();
     if (model == nullptr) return IBRH_ERROR_INTERNAL;
     model->runtime = runtime;
+    model->long_edge = static_cast<uint32_t>(long_edge);
     model->model_path = path;
     model->prompt_cache = prompt_cache;
 #if defined(MARIGOLD_WITH_VULKAN) && defined(_WIN32)
@@ -575,6 +593,7 @@ ibrh_result IBRH_CALL model_plan_outputs(
     const ibrh_result result = model_get_port(
         model, IBRH_PORT_OUTPUT, 0u, sizeof(outputs[0]), &outputs[0]);
     if (result != IBRH_OK) return result;
+    const inferbridge::native_harness::ScopedDiffusionShape shape_scope(model->long_edge);
     const int shape = marigold_inferbridge_image_shape(
         request->inputs[0].width, request->inputs[0].height,
         &outputs[0].width, &outputs[0].height);
@@ -587,6 +606,7 @@ ibrh_result IBRH_CALL submit(
     ibrh_model* model, size_t request_size,
     const ibrh_submit_request* request, ibrh_job** output) {
     if (!model || !request || !output) return IBRH_ERROR_INVALID_ARGUMENT;
+    const inferbridge::native_harness::ScopedDiffusionShape shape_scope(model->long_edge);
     *output = nullptr;
     if (request_size < sizeof(*request) || request->struct_size < sizeof(*request))
         return IBRH_ERROR_STRUCT_TOO_SMALL;
@@ -701,6 +721,7 @@ ibrh_result IBRH_CALL submit(
         job->width = input.width;
         job->height = input.height;
         job->seed = seed;
+        job->long_edge = model->long_edge;
         job->rgba = input.pixel_format == IBRH_PIXEL_RGBA8;
         job->gpu_state.store(IBRH_JOB_QUEUED);
         try {
@@ -853,6 +874,7 @@ struct LinuxCaptureHooks {
         uint64_t seed=frame?frame:timestamp?timestamp:model->next_seed.fetch_add(1u);
         if(parameters.find("\"Seed\"")!=std::string::npos && !json_uint64(parameters,"Seed",seed))
             throw std::invalid_argument("invalid capture Seed");
+        const inferbridge::native_harness::ScopedDiffusionShape shape_scope(model->long_edge);
         marigold_infer_linux_capture(model->context,source,seed,output);
     }
 };

@@ -56,12 +56,15 @@ int main() {
         return 2;
 
     const std::string model_path = path;
+    const char* size = std::getenv("MARIGOLD_SIZE");
+    const uint32_t expected_edge = size ? static_cast<uint32_t>(std::stoul(size)) : 768u;
     const std::string parameters =
         std::string("{\"Checkpoint\":\"") +
         (checkpoint == nullptr ?
             "prs-eth/marigold-lcm-v1-0" : checkpoint) +
         "\",\"VaeModel\":\"" + vae +
-        "\",\"PromptCache\":\"" + prompt + "\"}";
+        "\",\"PromptCache\":\"" + prompt + "\",\"Size\":\"" +
+        std::to_string(expected_edge) + "\"}";
     ibrh_model_load_request load_request{
         sizeof(load_request), IBRH_CURRENT_API_VERSION,
         view(model_path), view(parameters)};
@@ -80,11 +83,16 @@ int main() {
     constexpr uint32_t height = 41u;
     uint32_t output_width = 0u;
     uint32_t output_height = 0u;
-    if (!check(
-            marigold_inferbridge_image_shape(
-                width, height, &output_width, &output_height) == MARIGOLD_OK,
-            "output shape failed"))
-        return 4;
+    ibrh_resource shape_input{};
+    shape_input.width = width; shape_input.height = height;
+    ibrh_output_plan_request plan{sizeof(plan), IBRH_CURRENT_API_VERSION,
+        &shape_input, 1u, 0u, view(parameters)};
+    ibrh_port_descriptor planned{};
+    if (!check(api.model_plan_outputs(model, sizeof(plan), &plan, 1u, &planned) == IBRH_OK,
+               "output planning failed")) return 4;
+    output_width = planned.width; output_height = planned.height;
+    if (!check(output_width == (expected_edge & ~7u), "Size was ignored by output planning")) return 4;
+    std::cout << "planned_size=" << output_width << "x" << output_height << '\n';
     std::vector<uint8_t> pixels(width * height * 4u);
     for (uint32_t y = 0u; y < height; ++y) {
         for (uint32_t x = 0u; x < width; ++x) {

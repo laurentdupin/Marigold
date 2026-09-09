@@ -369,11 +369,13 @@ int main() try {
     const char* checkpoint_environment = std::getenv("MARIGOLD_CHECKPOINT");
     if (!vae_environment || !std::filesystem::exists(vae_environment) ||
         !checkpoint_environment) return 77;
+    const char* size_environment = std::getenv("MARIGOLD_SIZE");
+    const uint32_t expected_edge = size_environment ? static_cast<uint32_t>(std::stoul(size_environment)) : 768u;
     const std::string parameters =
         std::string("{\"Checkpoint\":\"") + checkpoint_environment +
         "\",\"VaeModel\":\"" + vae_environment +
         "\",\"PromptCache\":\"" + prompt_environment +
-        "\",\"Seed\":\"7\"}";
+        "\",\"Seed\":\"7\",\"Size\":\"" + std::to_string(expected_edge) + "\"}";
     ibrh_model_load_request load{};
     load.struct_size = sizeof(load);
     load.api_version = IBRH_CURRENT_API_VERSION;
@@ -389,7 +391,15 @@ int main() try {
     const std::uint64_t producer_completed = source.fence->GetCompletedValue();
     std::cout << "producer_fence=" << producer_completed
               << " requested_wait=" << source.value << '\n';
-    CoreOutput output = create_core_output(selected.device.Get(), width, height);
+    ibrh_resource shape_input{};
+    shape_input.width = width; shape_input.height = height;
+    ibrh_output_plan_request plan{sizeof(plan), IBRH_CURRENT_API_VERSION,
+        &shape_input, 1u, 0u, {parameters.data(), parameters.size()}};
+    ibrh_port_descriptor planned{};
+    check(api.model_plan_outputs(model, sizeof(plan), &plan, 1u, &planned), "model_plan_outputs");
+    if (planned.width != (expected_edge & ~7u)) throw std::runtime_error("Size was ignored");
+    std::cout << "planned_size=" << planned.width << "x" << planned.height << '\n';
+    CoreOutput output = create_core_output(selected.device.Get(), planned.width, planned.height);
     ibrh_transfer_binding bindings[2]{};
     auto& input = bindings[0];
     input.struct_size = sizeof(input); input.api_version = IBRH_CURRENT_API_VERSION;
@@ -417,7 +427,7 @@ int main() try {
     target.resource.kind = IBRH_RESOURCE_KIND_IMAGE_2D;
     target.resource.access = IBRH_RESOURCE_ACCESS_WRITE;
     target.resource.pixel_format = IBRH_PIXEL_DEPTH_FLOAT32;
-    target.resource.width = width; target.resource.height = height; target.resource.depth = 1u;
+    target.resource.width = planned.width; target.resource.height = planned.height; target.resource.depth = 1u;
     target.resource.native_handle_type = IBRH_NATIVE_HANDLE_WIN32_SHARED;
     target.resource.native_handle = reinterpret_cast<std::uintptr_t>(output.texture_handle);
     target.synchronization.struct_size = sizeof(target.synchronization);
@@ -487,7 +497,7 @@ int main() try {
          frame < 7007u + total_frames; ++frame) {
         Capture next_source = upload_texture(selected.device.Get(), queue.Get(),
             pixels(width, height, static_cast<std::uint32_t>(frame)), width, height);
-        CoreOutput next_output = create_core_output(selected.device.Get(), width, height);
+        CoreOutput next_output = create_core_output(selected.device.Get(), planned.width, planned.height);
         input.resource.native_handle =
             reinterpret_cast<std::uintptr_t>(next_source.texture_handle);
         input.synchronization.native_handle =
