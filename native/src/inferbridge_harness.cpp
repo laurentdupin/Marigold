@@ -1,3 +1,4 @@
+#include <inferbridge/native_harness_json.h>
 #include "inferbridge_harness.h"
 
 #include "marigold_native.h"
@@ -116,17 +117,7 @@ bool valid_string(ibrh_string_view value) {
 
 bool json_string(
     const std::string& json, const std::string& key, std::string& value) {
-    const std::string marker = "\"" + key + "\"";
-    size_t position = json.find(marker);
-    if (position == std::string::npos) return false;
-    position = json.find(':', position + marker.size());
-    if (position == std::string::npos) return false;
-    position = json.find_first_not_of(" \t\r\n", position + 1u);
-    if (position == std::string::npos || json[position] != '"') return false;
-    const size_t end = json.find('"', position + 1u);
-    if (end == std::string::npos) return false;
-    value = json.substr(position + 1u, end - position - 1u);
-    return true;
+    return inferbridge::harness_json::string_member(json, key, value);
 }
 
 bool json_uint64(
