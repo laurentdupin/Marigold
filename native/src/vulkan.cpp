@@ -422,21 +422,7 @@ VulkanContext::VulkanContext(
     std::vector<VkQueueFamilyProperties> families(family_count);
     vkGetPhysicalDeviceQueueFamilyProperties(
         physical_device_, &family_count, families.data());
-    // Keep long diffusion dispatches off the graphics queue used by the
-    // viewer when the adapter exposes a dedicated compute queue.
-    auto family = std::find_if(
-        families.begin(), families.end(), [](const auto& candidate) {
-            return candidate.queueCount > 0 &&
-                (candidate.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0 &&
-                (candidate.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0;
-        });
-    if (family == families.end()) {
-        family = std::find_if(
-            families.begin(), families.end(), [](const auto& candidate) {
-                return candidate.queueCount > 0 &&
-                    (candidate.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-            });
-    }
+    auto family = inferbridge::native_harness::select_inference_queue_family(families, true);
     if (family == families.end()) {
         throw std::runtime_error("Vulkan device has no compute queue");
     }
