@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 project(marigold_native LANGUAGES C CXX)
-include("${CMAKE_CURRENT_LIST_DIR}/../../native_support/InferBridgeNativeHarnessSupport.cmake")
+set(INFERBRIDGE_NATIVE_SUPPORT_DIR "" CACHE PATH
+    "InferBridge native harness SDK directory")
+if(NOT EXISTS "${INFERBRIDGE_NATIVE_SUPPORT_DIR}/InferBridgeNativeHarnessSupport.cmake")
+    message(FATAL_ERROR
+        "INFERBRIDGE_NATIVE_SUPPORT_DIR must identify the InferBridge native harness SDK")
+endif()
+include("${INFERBRIDGE_NATIVE_SUPPORT_DIR}/InferBridgeNativeHarnessSupport.cmake")
 link_libraries(InferBridge::NativeHarnessSupport)
 
 set(CMAKE_CXX_STANDARD 17)
