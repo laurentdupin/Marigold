@@ -1,3 +1,4 @@
+#include "inferbridge/native_harness_queue_priority.h"
 #include <inferbridge/native_harness_json.h>
 #include "inferbridge_harness.h"
 
@@ -478,6 +479,7 @@ ibrh_result IBRH_CALL model_load(
             "Marigold model path is missing");
     const std::string path = copy_string(request->model_path);
     const std::string parameters = copy_string(request->parameters_json);
+    const inferbridge::native_harness::ScopedQueuePriorityRequest queue_priority_scope(parameters);
     uint64_t long_edge = 768u;
     if (parameters.find("\"Size\"") != std::string::npos &&
         (!json_uint64(parameters, "Size", long_edge) || long_edge < 256u || long_edge > 1024u))
